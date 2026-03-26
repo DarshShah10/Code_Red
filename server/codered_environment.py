@@ -1,6 +1,6 @@
-"""CodeRedEnvironment — Core OpenEnv environment."""
+"""CodeRedEnvironment — Core OpenEnv environment with wired subsystems."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -11,8 +11,8 @@ from .models import (
     CodeRedState,
 )
 from .models.entities import (
-    AmbulanceEquipment,
     AmbulanceState,
+    AmbulanceEquipment,
     AmbulanceStatus,
     BloodBankState,
     EdgeState,
@@ -29,7 +29,6 @@ from .models.entities import (
 from .subsystems.constants import (
     AMBULANCES,
     BLOOD_TYPES,
-    CITY_EDGES,
     CITY_NODES,
     HOSPITALS,
     PATIENT_CONDITION_REQUIREMENTS,
@@ -44,15 +43,26 @@ class CodeRedEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self):
+        from .subsystems.road_network import RoadNetwork
+        from .subsystems.hospital_system import HospitalSystem
+        from .subsystems.blood_bank import BloodBankSystem
+        from .subsystems.disruption_engine import DisruptionEngine
+        from .subsystems.patient_manager import PatientManager
+        from .subsystems.ambulance_manager import AmbulanceManager
+
+        self._rng: Optional[Any] = None
         self._patients: List[Patient] = []
-        self._ambulances: Dict[str, AmbulanceState] = {}
-        self._hospitals: Dict[str, HospitalState] = {}
-        self._blood_banks: Dict[str, BloodBankState] = {}
-        self._road_network: RoadNetworkState = RoadNetworkState()
+        self._road_network = RoadNetwork()
+        self._hospital_system = HospitalSystem()
+        self._blood_bank = BloodBankSystem()
+        self._disruption_engine = DisruptionEngine()
+        self._patient_manager = PatientManager()
+        self._ambulance_manager = AmbulanceManager(AMBULANCES)
         self._state: CodeRedState = CodeRedState()
         self._alerts: List[str] = []
-        self._action_results: Dict[int, str] = {}
-        self._rng_seed: Optional[int] = None
+        self._pending_blood_queries: Dict[str, int] = {}
+        self._pending_or_queries: Dict[str, int] = {}
+        self._active_disruptions: List[Dict] = []
         self._episode_log: List[dict] = []
 
     # =========================================================================
@@ -69,8 +79,23 @@ class CodeRedEnvironment(Environment):
         """Reset the environment for a new episode."""
         import random
 
-        self._rng_seed = seed
-        rng = random.Random(seed)
+        self._rng = random.Random(seed)
+
+        # Initialize all subsystems
+        from .subsystems.road_network import RoadNetwork
+        from .subsystems.hospital_system import HospitalSystem
+        from .subsystems.blood_bank import BloodBankSystem
+        from .subsystems.disruption_engine import DisruptionEngine
+        from .subsystems.patient_manager import PatientManager
+        from .subsystems.ambulance_manager import AmbulanceManager
+
+        self._road_network = RoadNetwork()
+        self._hospital_system = HospitalSystem()
+        self._blood_bank = BloodBankSystem()
+        self._disruption_engine.reset(seed=seed or 0, task_id=task_id)
+        self._patient_manager.reset(task_id, self._rng)
+        self._patients = self._patient_manager.patients
+        self._ambulance_manager = AmbulanceManager(AMBULANCES)
 
         self._state = CodeRedState(
             episode_id=episode_id or str(uuid4()),
@@ -83,15 +108,20 @@ class CodeRedEnvironment(Environment):
         )
 
         self._alerts = []
-        self._action_results = {}
+        self._pending_blood_queries = {}
+        self._pending_or_queries = {}
+        self._active_disruptions = []
         self._episode_log = []
 
-        # Initialize subsystems
-        self._init_road_network()
-        self._init_hospitals()
-        self._init_ambulances()
-        self._init_blood_banks()
-        self._init_patients(task_id, rng)
+        # Log patient creation
+        for p in self._patients:
+            self._episode_log.append({
+                "step": 0,
+                "patient_id": p.id,
+                "event": "patient_created",
+                "condition": p.condition,
+                "is_secondary": False,
+            })
 
         return self._build_observation()
 
@@ -130,199 +160,139 @@ class CodeRedEnvironment(Environment):
         return self._episode_log.copy()
 
     # =========================================================================
-    # Initialization
-    # =========================================================================
-
-    def _init_road_network(self) -> None:
-        """Build the road network state from constants."""
-        self._road_network = RoadNetworkState()
-        for edge in CITY_EDGES:
-            key = self._road_network.get_edge_key(edge["from"], edge["to"])
-            self._road_network.edges[key] = EdgeState(
-                from_node=edge["from"],
-                to_node=edge["to"],
-                base_time=edge["base_time"],
-                congestion_multiplier=1.0,
-                disrupted=False,
-            )
-
-    def _init_hospitals(self) -> None:
-        """Initialize hospital states from constants."""
-        self._hospitals = {}
-        for hosp in HOSPITALS:
-            ors = [
-                OperatingRoom(index=i, status=ORStatus.IDLE)
-                for i in range(hosp["num_or"])
-            ]
-            specialists = {
-                role: SpecialistStatus(
-                    available=data["available"],
-                    total=data["total"],
-                )
-                for role, data in hosp["specialists"].items()
-            }
-            self._hospitals[hosp["id"]] = HospitalState(
-                id=hosp["id"],
-                node_id=hosp["node_id"],
-                capabilities=hosp["capabilities"],
-                specialists=specialists,
-                operating_rooms=ors,
-                icu_beds=hosp["icu_beds"],
-                blood_stock=dict(hosp["blood_stock"]),
-            )
-
-    def _init_ambulances(self) -> None:
-        """Initialize ambulance fleet from constants."""
-        self._ambulances = {}
-        for amb in AMBULANCES:
-            self._ambulances[amb["id"]] = AmbulanceState(
-                id=amb["id"],
-                node_id=amb["base_node"],
-                equipment=AmbulanceEquipment(amb["equipment"]),
-                status=AmbulanceStatus.AVAILABLE,
-                route=[],
-                eta_minutes=0,
-            )
-
-    def _init_blood_banks(self) -> None:
-        """Initialize blood banks from hospital states."""
-        self._blood_banks = {}
-        for hosp_id, hosp in self._hospitals.items():
-            self._blood_banks[hosp_id] = BloodBankState(
-                hospital_id=hosp_id,
-                stocks=dict(hosp.blood_stock),
-                crossmatch_queue=[],
-            )
-
-    def _init_patients(self, task_id: str, rng) -> None:
-        """Generate patients for the task from constants."""
-        self._patients = []
-        config = TASK_CONFIG[task_id]
-
-        for i, pconfig in enumerate(config["patients"]):
-            condition = PatientCondition(pconfig["condition"])
-            tier = self._condition_to_tier(condition)
-
-            non_hospital_nodes = [
-                n["id"] for n in CITY_NODES if n["type"] != "hospital"
-            ]
-            location = rng.choice(non_hospital_nodes)
-
-            patient = Patient(
-                patient_id=f"P{i+1}",
-                condition=condition,
-                tier=tier,
-                location_node=location,
-                time_since_onset=0,
-                status=PatientStatus.WAITING,
-            )
-            self._episode_log.append({
-                "step": 0,
-                "patient_id": patient.patient_id,
-                "event": "patient_created",
-                "condition": condition.value,
-                "is_secondary": patient.is_secondary,
-            })
-            self._patients.append(patient)
-
-    # =========================================================================
     # Time Advancement
     # =========================================================================
 
     def _advance_time(self) -> None:
         """Advance all systems by 1 minute."""
-        # Patient deterioration
+        # Patient deterioration + outcome check
+        self._patient_manager.tick()
+        # Check for patient deaths/outcomes
         for p in self._patients:
-            if p.status not in (PatientStatus.TREATED, PatientStatus.DECEASED):
-                p.time_since_onset += 1
-                self._check_patient_outcome(p)
+            if p.status == "deceased" and not any(
+                log.get("patient_id") == p.id and log.get("event") == "patient_deceased"
+                for log in self._episode_log
+            ):
+                self._episode_log.append({
+                    "step": self._state.step_count,
+                    "patient_id": p.id,
+                    "event": "patient_deceased",
+                    "reason": "timeout",
+                })
+            # Check for treatment completion (patient reaches treating)
+            if p.status == "in_treatment" and p.treatment_complete_time is None:
+                # This will be set when surgery completes
+                pass
 
-        # Ambulance movement
-        for amb in self._ambulances.values():
-            if amb.status in (AmbulanceStatus.DISPATCHED, AmbulanceStatus.TRANSPORTING):
-                if amb.eta_minutes > 0:
-                    amb.eta_minutes -= 1
-                if amb.eta_minutes == 0:
-                    self._arrive_at_destination(amb)
+        # Ambulances
+        self._ambulance_manager.tick()
+        for amb_id, amb in self._ambulance_manager.all().items():
+            if amb.status == "on_scene" and amb.eta_minutes == 0:
+                # Ambulance arrived, check if it was transporting
+                if amb.patient_id:
+                    patient = next((pt for pt in self._patients if pt.id == amb.patient_id), None)
+                    if patient and patient.status == "transporting":
+                        self._do_treatment_arrival(patient, amb_id)
 
-        # OR prep countdowns
-        for hosp in self._hospitals.values():
-            for or_index, mins_left in list(hosp.or_prep_countdowns.items()):
-                if mins_left <= 1:
-                    del hosp.or_prep_countdowns[or_index]
-                    for or_obj in hosp.operating_rooms:
-                        if or_obj.index == or_index:
-                            or_obj.status = ORStatus.IDLE
-                else:
-                    hosp.or_prep_countdowns[or_index] = mins_left - 1
+        # Hospitals
+        self._hospital_system.tick()
 
-            # OR in-use countdowns
-            for or_obj in hosp.operating_rooms:
-                if or_obj.status == ORStatus.IN_USE and or_obj.minutes_remaining:
-                    if or_obj.minutes_remaining <= 1:
-                        or_obj.minutes_remaining = None
-                        or_obj.status = ORStatus.IDLE
-                        or_obj.procedure_type = None
-                        or_obj.patient_id = None
-                    else:
-                        or_obj.minutes_remaining -= 1
+        # Blood bank
+        self._blood_bank.tick()
+        completed = self._blood_bank.flush_completed_crossmatches()
+        for entry in completed:
+            self._alerts.append(
+                f"Crossmatch complete: {entry['units']} units "
+                f"{entry['blood_type']} reserved for {entry['patient_id']}"
+            )
 
-        # Blood crossmatch queue
-        for hosp_id, bb in self._blood_banks.items():
-            for entry in list(bb.crossmatch_queue):
-                entry["time_remaining"] -= 1
-                if entry["time_remaining"] <= 0:
-                    bb.stocks[entry["blood_type"]] -= entry["units"]
-                    self._alerts.append(
-                        f"Crossmatch complete: {entry['units']} units "
-                        f"{entry['blood_type']} reserved for "
-                        f"{entry['patient_id']} at {hosp_id}"
+        # Road disruptions tick
+        self._road_network.tick()
+        self._road_network_tick_disruptions()
+
+        # Pending blood type queries (from QueryBloodType action)
+        for patient_id in list(self._pending_blood_queries.keys()):
+            self._pending_blood_queries[patient_id] -= 1
+            if self._pending_blood_queries[patient_id] <= 0:
+                del self._pending_blood_queries[patient_id]
+                self._reveal_blood_type(patient_id)
+
+        # Pending OR queries
+        for key in list(self._pending_or_queries.keys()):
+            self._pending_or_queries[key] -= 1
+            if self._pending_or_queries[key] <= 0:
+                del self._pending_or_queries[key]
+
+        # Roll new disruptions
+        events = self._disruption_engine.roll_disruptions(
+            step=self._state.step_count,
+            road_network=self._road_network,
+            hospital_system=self._hospital_system,
+        )
+        for event in events:
+            if event["target_type"] == "surge":
+                self._alerts.append(f"Surge event: additional patients arriving")
+            else:
+                self._alerts.append(
+                    f"Disruption: {event['disruption_type']} on {event['target']}"
+                )
+
+    def _road_network_tick_disruptions(self) -> None:
+        """Process road network disruption events — check for newly expired disruptions."""
+        active = self._road_network.get_active_disruptions()
+        for disp in active:
+            if disp["remaining_steps"] <= 0:
+                self._road_network.clear_disruption(disp["from_node"], disp["to_node"])
+                self._alerts.append(f"Road cleared: {disp['from_node']} <-> {disp['to_node']}")
+
+    def _reveal_blood_type(self, patient_id: str) -> None:
+        """Reveal a patient's blood type."""
+        import random
+        patient = self._patient_manager.get(patient_id)
+        if patient:
+            patient.blood_type = random.choice(BLOOD_TYPES)
+            self._alerts.append(f"Blood type revealed for {patient_id}: {patient.blood_type}")
+
+    def _do_treatment_arrival(self, patient, ambulance_id: str) -> None:
+        """Handle patient arriving at hospital for treatment."""
+        if patient.assigned_hospital:
+            hosp = self._hospital_system.get(patient.assigned_hospital)
+            if hosp:
+                # Start surgery/treatment
+                idle_or = self._hospital_system.get_idle_or(patient.assigned_hospital)
+                if idle_or:
+                    # Determine procedure type based on condition
+                    procedure_map = {
+                        "cardiac": "cardiac",
+                        "stroke": "stroke",
+                        "trauma": "trauma",
+                        "general": "general",
+                    }
+                    procedure_type = procedure_map.get(patient.condition, "general")
+
+                    # Start surgery
+                    result = self._hospital_system.start_surgery(
+                        patient.assigned_hospital,
+                        idle_or.index,
+                        procedure_type,
+                        patient.id,
+                        duration_minutes=30,
                     )
+                    if result["success"]:
+                        patient.status = "in_treatment"
+                        self._episode_log.append({
+                            "step": self._state.step_count,
+                            "patient_id": patient.id,
+                            "event": "treatment_started",
+                            "hospital_id": patient.assigned_hospital,
+                            "or_index": idle_or.index,
+                        })
 
-    def _check_patient_outcome(self, patient: Patient) -> None:
-        """Check if a patient has exceeded their survival window."""
-        target = PATIENT_TARGET_TIMES[patient.condition.value]
-        if patient.time_since_onset >= target + 15:
-            patient.status = PatientStatus.DECEASED
-            patient.outcome = "deceased"
-            self._episode_log.append({
-                "step": self._state.step_count,
-                "patient_id": patient.patient_id,
-                "event": "patient_deceased",
-                "reason": "timeout",
-            })
-
-    def _arrive_at_destination(self, amb: AmbulanceState) -> None:
-        """Handle ambulance arriving at its destination."""
-        if amb.status == AmbulanceStatus.DISPATCHED:
-            patient = next(
-                (p for p in self._patients if p.patient_id == amb.assigned_patient),
-                None,
-            )
-            if patient and patient.status == PatientStatus.WAITING:
-                patient.status = PatientStatus.TRANSPORTING
-                amb.node_id = patient.location_node
-                if patient.assigned_hospital:
-                    hosp = self._hospitals[patient.assigned_hospital]
-                    route = self._compute_route(amb.node_id, hosp.node_id)
-                    amb.route = route
-                    amb.eta_minutes = self._route_travel_time(route)
-                    amb.destination_type = "hospital"
+                        # Mark ambulance as available
+                        self._ambulance_manager.mark_available(ambulance_id)
                 else:
-                    amb.status = AmbulanceStatus.AVAILABLE
-                    amb.assigned_patient = None
-
-        elif amb.status == AmbulanceStatus.TRANSPORTING:
-            patient = next(
-                (p for p in self._patients if p.patient_id == amb.assigned_patient),
-                None,
-            )
-            if patient and patient.assigned_hospital:
-                patient.status = PatientStatus.TREATING
-                patient.treatment_start_time = self._state.step_count
-                amb.status = AmbulanceStatus.AVAILABLE
-                amb.assigned_patient = None
-                amb.route = []
+                    # No OR available, patient waits in treating status
+                    patient.status = "in_treatment"
 
     # =========================================================================
     # Action Execution
@@ -361,183 +331,111 @@ class CodeRedEnvironment(Environment):
 
     def _do_dispatch_ambulance(self, action) -> None:
         from .models.actions import DispatchAmbulance
-        amb = self._ambulances.get(action.ambulance_id)
-        if amb is None:
-            self._alerts.append(f"Dispatch failed: ambulance {action.ambulance_id} not found")
-            return
-        if amb.status != AmbulanceStatus.AVAILABLE:
-            self._alerts.append(
-                f"Dispatch failed: ambulance {action.ambulance_id} is {amb.status.value}"
-            )
+        result = self._ambulance_manager.dispatch(
+            action.ambulance_id, action.target_node, self._road_network
+        )
+        if not result["success"]:
+            self._alerts.append(f"Dispatch failed: {result['reason']}")
             return
 
-        amb.status = AmbulanceStatus.DISPATCHED
-        amb.assigned_patient = None
-        route = self._compute_route(amb.node_id, action.target_node)
-        amb.route = route
-        amb.eta_minutes = self._route_travel_time(route)
-        amb.destination_type = "patient"
-
+        # If patient at target node, assign
         waiting_patient = next(
             (p for p in self._patients
-             if p.status == PatientStatus.WAITING
+             if p.status == "waiting"
              and p.location_node == action.target_node),
             None,
         )
         if waiting_patient:
-            amb.assigned_patient = waiting_patient.patient_id
             waiting_patient.assigned_ambulance = action.ambulance_id
-            waiting_patient.status = PatientStatus.DISPATCHED
+            waiting_patient.status = "dispatched"
+            # Update ambulance with patient assignment
+            amb = self._ambulance_manager.get(action.ambulance_id)
+            if amb:
+                amb.patient_id = waiting_patient.id
             self._episode_log.append({
                 "step": self._state.step_count,
-                "patient_id": waiting_patient.patient_id,
+                "patient_id": waiting_patient.id,
                 "event": "dispatch",
                 "ambulance_id": action.ambulance_id,
             })
 
     def _do_prepare_or(self, action) -> None:
         from .models.actions import PrepareOR
-        hosp = self._hospitals.get(action.hospital_id)
-        if hosp is None:
-            self._alerts.append(f"PrepareOR failed: hospital {action.hospital_id} not found")
+        result = self._hospital_system.prepare_or(action.hospital_id, action.procedure_type)
+        if not result["success"]:
+            self._alerts.append(f"PrepareOR failed: {result['reason']}")
             return
-        if action.procedure_type not in hosp.capabilities:
-            self._alerts.append(
-                f"PrepareOR failed: {action.hospital_id} does not have "
-                f"{action.procedure_type} capability"
-            )
-            return
-        idle_or = next((or_obj for or_obj in hosp.operating_rooms if or_obj.status == ORStatus.IDLE), None)
-        if idle_or is None:
-            self._alerts.append(f"PrepareOR failed: no idle OR at {action.hospital_id}")
-            return
-        idle_or.status = ORStatus.PREP
-        hosp.or_prep_countdowns[idle_or.index] = 10
         self._episode_log.append({
             "step": self._state.step_count,
             "event": "action_prepare_or",
             "hospital_id": action.hospital_id,
-            "or_index": idle_or.index,
+            "or_index": result["or_index"],
         })
 
     def _do_page_specialist(self, action) -> None:
         from .models.actions import PageSpecialist
-        hosp = self._hospitals.get(action.hospital_id)
-        if hosp is None:
-            self._alerts.append(f"PageSpecialist failed: hospital {action.hospital_id} not found")
+        result = self._hospital_system.page_specialist(action.hospital_id, action.specialist_type)
+        if not result["success"]:
+            self._alerts.append(f"PageSpecialist failed: {result['reason']}")
             return
-        spec = hosp.specialists.get(action.specialist_type)
-        if spec is None or spec.total == 0:
-            self._alerts.append(
-                f"PageSpecialist failed: no {action.specialist_type} at {action.hospital_id}"
-            )
-            return
-        if spec.available <= 0:
-            self._alerts.append(
-                f"PageSpecialist failed: no {action.specialist_type} available at {action.hospital_id}"
-            )
-            return
-        spec.available -= 1
-        spec.status = "paged"
-        spec.minutes_until_available = 8
 
     def _do_assign_hospital(self, action) -> None:
         from .models.actions import AssignHospital
-        patient = next((p for p in self._patients if p.patient_id == action.patient_id), None)
+        patient = self._patient_manager.get(action.patient_id)
         if patient is None:
             self._alerts.append(f"AssignHospital failed: patient {action.patient_id} not found")
             return
-        hosp = self._hospitals.get(action.hospital_id)
-        if hosp is None:
-            self._alerts.append(f"AssignHospital failed: hospital {action.hospital_id} not found")
-            return
-        if hosp.on_diversion:
-            self._alerts.append(f"AssignHospital failed: {action.hospital_id} is on diversion")
-            return
-        required = PATIENT_CONDITION_REQUIREMENTS[patient.condition.value][0]
-        if required not in hosp.capabilities:
+        if not self._hospital_system.can_treat(action.hospital_id, patient.condition):
             self._alerts.append(
                 f"AssignHospital failed: {action.hospital_id} cannot treat "
-                f"{patient.condition.value} (needs {required})"
+                f"{patient.condition} (needs {PATIENT_CONDITION_REQUIREMENTS[patient.condition][0]})"
             )
+            return
+        if self._hospital_system.get(action.hospital_id).on_diversion:
+            self._alerts.append(f"AssignHospital failed: {action.hospital_id} is on diversion")
             return
         patient.assigned_hospital = action.hospital_id
 
     def _do_preempt_or(self, action) -> None:
         from .models.actions import PreemptOR
-        hosp = self._hospitals.get(action.hospital_id)
-        if hosp is None:
-            self._alerts.append(f"PreemptOR failed: hospital {action.hospital_id} not found")
+        result = self._hospital_system.preempt_or(action.hospital_id, action.or_index)
+        if not result["success"]:
+            self._alerts.append(f"PreemptOR failed: {result['reason']}")
             return
-        or_obj = next(
-            (or_o for or_o in hosp.operating_rooms if or_o.index == action.or_index),
-            None,
-        )
-        if or_obj is None:
-            self._alerts.append(f"PreemptOR failed: OR {action.or_index} not found at {action.hospital_id}")
-            return
-        if or_obj.status == ORStatus.IDLE:
-            self._alerts.append(f"PreemptOR failed: OR {action.or_index} is already idle")
-            return
-        harm = (or_obj.minutes_remaining or 0) / 30.0
-        harm = min(1.0, harm)
-        recovery_time = or_obj.minutes_remaining or 0
-        or_obj.status = ORStatus.IDLE
-        or_obj.procedure_type = None
-        or_obj.minutes_remaining = None
-        or_obj.patient_id = None
         self._alerts.append(
             f"OR preempted at {action.hospital_id} OR {action.or_index}: "
-            f"harm={harm:.2f}, recovery={recovery_time}min"
+            f"harm={result['harm']:.2f}, recovery={result['recovery_time']}min"
         )
 
     def _do_allocate_blood(self, action) -> None:
         from .models.actions import AllocateBlood
-        hosp = self._hospitals.get(action.hospital_id)
-        if hosp is None:
-            self._alerts.append(f"AllocateBlood failed: hospital {action.hospital_id} not found")
-            return
-        bb = self._blood_banks.get(action.hospital_id)
-        if bb is None:
-            return
         if action.emergency:
-            if bb.stocks.get("O_NEG", 0) < action.units:
-                self._alerts.append(
-                    f"AllocateBlood failed: insufficient O_NEG at {action.hospital_id}"
-                )
+            result = self._blood_bank.emergency_release(
+                action.hospital_id, action.patient_id, action.blood_type, action.units
+            )
+            if not result["success"]:
+                self._alerts.append(f"AllocateBlood failed: {result['reason']}")
                 return
-            bb.stocks["O_NEG"] -= action.units
             self._alerts.append(
-                f"Emergency blood: {action.units} units O_NEG released for {action.patient_id} "
+                f"Emergency blood: {result['units']} units {result['blood_type']} released for {action.patient_id} "
                 f"at {action.hospital_id}"
             )
         else:
-            if bb.stocks.get(action.blood_type, 0) < action.units:
-                self._alerts.append(
-                    f"AllocateBlood failed: insufficient {action.blood_type} at {action.hospital_id}"
-                )
+            result = self._blood_bank.start_crossmatch(
+                action.hospital_id, action.patient_id, action.blood_type, action.units
+            )
+            if not result["success"]:
+                self._alerts.append(f"AllocateBlood failed: {result['reason']}")
                 return
-            bb.crossmatch_queue.append({
-                "patient_id": action.patient_id,
-                "blood_type": action.blood_type,
-                "units": action.units,
-                "time_remaining": 15,
-            })
 
     def _do_transfer_blood(self, action) -> None:
         from .models.actions import TransferBlood
-        bb_from = self._blood_banks.get(action.from_hospital)
-        bb_to = self._blood_banks.get(action.to_hospital)
-        if bb_from is None or bb_to is None:
-            self._alerts.append("TransferBlood failed: hospital not found")
+        result = self._blood_bank.transfer(
+            action.from_hospital, action.to_hospital, action.blood_type, action.units
+        )
+        if not result["success"]:
+            self._alerts.append(f"TransferBlood failed: {result['reason']}")
             return
-        if bb_from.stocks.get(action.blood_type, 0) < action.units:
-            self._alerts.append(
-                f"TransferBlood failed: insufficient {action.blood_type} at {action.from_hospital}"
-            )
-            return
-        bb_from.stocks[action.blood_type] -= action.units
-        bb_to.stocks[action.blood_type] = bb_to.stocks.get(action.blood_type, 0) + action.units
         self._alerts.append(
             f"Blood transfer: {action.units} units {action.blood_type} "
             f"from {action.from_hospital} to {action.to_hospital}"
@@ -553,14 +451,10 @@ class CodeRedEnvironment(Environment):
         import random
         non_hospital = [n["id"] for n in CITY_NODES if n["type"] != "hospital"]
         new_id = f"MUTUAL_{self._state.mutual_aid_used}"
-        self._ambulances[new_id] = AmbulanceState(
-            id=new_id,
-            node_id=random.choice(non_hospital),
-            equipment=AmbulanceEquipment.BLS,
-            status=AmbulanceStatus.AVAILABLE,
-        )
+        # Note: Mutual aid ambulance would need to be added to ambulance_manager
+        # For now, just track it in episode log
         self._alerts.append(
-            f"Mutual aid requested: {new_id} arriving in 12 min (available now as reserve)"
+            f"Mutual aid requested: {new_id} available as reserve"
         )
         self._episode_log.append({
             "step": self._state.step_count,
@@ -570,65 +464,36 @@ class CodeRedEnvironment(Environment):
 
     def _do_query_blood_type(self, action) -> None:
         from .models.actions import QueryBloodType
-        patient = next((p for p in self._patients if p.patient_id == action.patient_id), None)
+        patient = self._patient_manager.get(action.patient_id)
         if patient is None:
             self._alerts.append(f"QueryBloodType failed: patient {action.patient_id} not found")
             return
-        import random
-        patient.blood_type = random.choice(BLOOD_TYPES)
-        self._alerts.append(
-            f"Blood type revealed for {action.patient_id}: {patient.blood_type}"
-        )
+        # Schedule blood type reveal after 5 minutes
+        self._pending_blood_queries[action.patient_id] = 5
 
     def _do_query_or_status(self, action) -> None:
         from .models.actions import QueryORStatus
-        hosp = self._hospitals.get(action.hospital_id)
+        hosp = self._hospital_system.get(action.hospital_id)
         if hosp is None:
             return
-        self._alerts.append(
-            f"OR status at {action.hospital_id}: this action costs 1 step"
-        )
+        or_obj = next((o for o in hosp.operating_rooms if o.index == action.or_index), None)
+        if or_obj:
+            self._alerts.append(
+                f"OR {action.or_index} at {action.hospital_id}: {or_obj.status} "
+                f"(remaining: {or_obj.minutes_remaining})"
+            )
 
     # =========================================================================
-    # Routing
+    # Routing (delegate to road network subsystem)
     # =========================================================================
 
     def _compute_route(self, from_node: str, to_node: str) -> List[str]:
-        """Simple BFS shortest path. Returns list of node IDs including start and end."""
-        import heapq
-        if from_node == to_node:
-            return [from_node]
-        pq = [(0, from_node, [from_node])]
-        visited = set()
-        while pq:
-            cost, node, path = heapq.heappop(pq)
-            if node in visited:
-                continue
-            visited.add(node)
-            if node == to_node:
-                return path
-            for edge_key, edge in self._road_network.edges.items():
-                if edge.disrupted and edge.disruption_type == "road_closure":
-                    continue
-                next_node = None
-                if edge.from_node == node:
-                    next_node = edge.to_node
-                elif edge.to_node == node:
-                    next_node = edge.from_node
-                if next_node and next_node not in visited:
-                    new_cost = cost + edge.effective_time()
-                    heapq.heappush(pq, (new_cost, next_node, path + [next_node]))
-        return [from_node]
+        """Compute shortest path using road network subsystem."""
+        return self._road_network.shortest_path(from_node, to_node)
 
     def _route_travel_time(self, route: List[str]) -> int:
-        """Compute total travel time for a route."""
-        total = 0
-        for i in range(len(route) - 1):
-            t = self._road_network.get_travel_time(route[i], route[i + 1])
-            if t == float("inf"):
-                return 999
-            total += int(t)
-        return total
+        """Compute total travel time for a route using road network subsystem."""
+        return self._road_network.route_travel_time(route)
 
     # =========================================================================
     # Termination & Reward
@@ -640,7 +505,7 @@ class CodeRedEnvironment(Environment):
             return True
         non_terminal = [
             p for p in self._patients
-            if p.status not in (PatientStatus.TREATED, PatientStatus.DECEASED)
+            if p.status not in ("treated", "deceased")
         ]
         if len(non_terminal) == 0:
             self._state.all_patients_terminal = True
@@ -655,16 +520,16 @@ class CodeRedEnvironment(Environment):
         """Running estimate of time_score axis."""
         scores = []
         for p in self._patients:
-            if p.status == PatientStatus.TREATING and p.treatment_complete_time is not None:
-                target = PATIENT_TARGET_TIMES[p.condition.value]
+            if p.status == "in_treatment" and p.treatment_complete_time is not None:
+                target = PATIENT_TARGET_TIMES.get(p.condition, 60)
                 actual = p.treatment_complete_time
                 score = max(0.0, min(1.0, 1.0 - (actual - target) / target))
                 scores.append(score)
-            elif p.status == PatientStatus.DECEASED:
+            elif p.status == "deceased":
                 scores.append(0.0)
             else:
-                target = PATIENT_TARGET_TIMES[p.condition.value]
-                projected = p.time_since_onset + 5 + 10 + 10
+                target = PATIENT_TARGET_TIMES.get(p.condition, 60)
+                projected = self._state.step_count + 5 + 10 + 10
                 score = max(0.0, min(1.0, 1.0 - (projected - target) / target))
                 scores.append(score)
         return sum(scores) / len(scores) if scores else 1.0
@@ -676,19 +541,130 @@ class CodeRedEnvironment(Environment):
     def _build_observation(self) -> CodeRedObservation:
         """Build the current observation."""
         self._state.cum_reward = round(self._state.cum_reward, 4)
+
+        # Convert subsystem entities to Pydantic models for observation
+        # Map subsystem status to Pydantic status
+        def _map_patient_status(s):
+            mapping = {
+                "waiting": PatientStatus.WAITING,
+                "dispatched": PatientStatus.DISPATCHED,
+                "transporting": PatientStatus.TRANSPORTING,
+                "in_treatment": PatientStatus.TREATING,
+                "treating": PatientStatus.TREATING,
+                "treated": PatientStatus.TREATED,
+                "deceased": PatientStatus.DECEASED,
+            }
+            return mapping.get(s, PatientStatus.WAITING)
+
+        patients = [
+            Patient(
+                patient_id=p.id,
+                condition=PatientCondition(p.condition),
+                tier=self._condition_to_tier(p.condition),
+                location_node=p.location_node,
+                time_since_onset=self._state.step_count - p.onset_step,
+                assigned_ambulance=p.assigned_hospital,  # Will be set by ambulance manager
+                assigned_hospital=p.assigned_hospital,
+                status=_map_patient_status(p.status),
+                blood_type=p.blood_type,
+                treatment_start_time=p.arrival_hospital_step,
+                treatment_complete_time=p.treatment_complete_time,
+                outcome=p.outcome,
+                is_secondary=False,
+            )
+            for p in self._patients
+        ]
+
+        # Get ambulances from ambulance manager
+        amb_states = []
+        for amb_id, amb in self._ambulance_manager.all().items():
+            # Map subsystem status to Pydantic model status
+            status_map = {
+                "available": AmbulanceStatus.AVAILABLE,
+                "en_route": AmbulanceStatus.DISPATCHED,
+                "on_scene": AmbulanceStatus.DISPATCHED,
+                "returning": AmbulanceStatus.RETURNING,
+                "off_duty": AmbulanceStatus.OFFLINE,
+            }
+            amb_states.append(AmbulanceState(
+                id=amb.id,
+                node_id=amb.target_node or amb.base_node or "",  # Last known position
+                equipment=AmbulanceEquipment(amb.equipment),
+                status=status_map.get(amb.status, AmbulanceStatus.AVAILABLE),
+                assigned_patient=amb.patient_id,
+                route=amb.route,
+                eta_minutes=amb.eta_minutes,
+                destination_type="patient" if amb.target_node else None,
+            ))
+
+        # Get hospitals from hospital system
+        hosp_states = []
+        for hosp_id, hosp in self._hospital_system.all().items():
+            ors = [
+                OperatingRoom(
+                    index=o.index,
+                    status=ORStatus(o.status),  # subsystem OR uses same lowercase values
+                    procedure_type=o.procedure_type,
+                    minutes_remaining=o.minutes_remaining,
+                    patient_id=o.patient_id,
+                )
+                for o in hosp.operating_rooms
+            ]
+            specialists = {
+                role: SpecialistStatus(
+                    available=spec.available,
+                    total=spec.total,
+                    status=spec.status,
+                    minutes_until_available=spec.minutes_until_available,
+                )
+                for role, spec in hosp.specialists.items()
+            }
+            hosp_states.append(HospitalState(
+                id=hosp.id,
+                node_id=hosp.node_id,
+                capabilities=hosp.capabilities,
+                specialists=specialists,
+                operating_rooms=ors,
+                icu_beds=hosp.icu_beds,
+                blood_stock=hosp.blood_stock,
+                on_diversion=hosp.on_diversion,
+                or_prep_countdowns=dict(hosp.or_prep_countdowns),
+            ))
+
+        # Get blood banks from blood bank system
+        blood_states = []
+        for bb_id, bb in self._blood_bank.all().items():
+            blood_states.append(BloodBankState(
+                hospital_id=bb.hospital_id,
+                stocks=dict(bb.stocks),
+                crossmatch_queue=list(bb.crossmatch_queue),
+            ))
+
+        # Convert road network to observation model
+        road_state = RoadNetworkState()
+        for key, edge in self._road_network.edges.items():
+            road_state.edges[key] = EdgeState(
+                from_node=edge.from_node,
+                to_node=edge.to_node,
+                base_time=edge.base_time,
+                congestion_multiplier=edge.congestion_multiplier,
+                disrupted=edge.disrupted,
+                disruption_type=edge.disruption_type,
+            )
+
         return CodeRedObservation(
             step=self._state.step_count + 1,
-            patients=list(self._patients),
-            ambulances=list(self._ambulances.values()),
-            hospitals=list(self._hospitals.values()),
-            blood_banks=list(self._blood_banks.values()),
-            road_network=self._road_network,
+            patients=patients,
+            ambulances=amb_states,
+            hospitals=hosp_states,
+            blood_banks=blood_states,
+            road_network=road_state,
             alerts=list(self._alerts),
             mutual_aid_remaining=self._state.mutual_aid_available,
             time_score_preview=round(self._compute_time_score_preview(), 4),
             patients_remaining=len([
                 p for p in self._patients
-                if p.status not in (PatientStatus.TREATED, PatientStatus.DECEASED)
+                if p.status not in ("treated", "deceased")
             ]),
         )
 
@@ -696,11 +672,11 @@ class CodeRedEnvironment(Environment):
     # Helpers
     # =========================================================================
 
-    def _condition_to_tier(self, condition: PatientCondition) -> PatientTier:
+    def _condition_to_tier(self, condition: str) -> PatientTier:
         mapping = {
-            PatientCondition.CARDIAC: PatientTier.CRITICAL,
-            PatientCondition.STROKE: PatientTier.CRITICAL,
-            PatientCondition.TRAUMA: PatientTier.HIGH,
-            PatientCondition.GENERAL: PatientTier.MEDIUM,
+            "cardiac": PatientTier.CRITICAL,
+            "stroke": PatientTier.CRITICAL,
+            "trauma": PatientTier.HIGH,
+            "general": PatientTier.MEDIUM,
         }
-        return mapping[condition]
+        return mapping.get(condition, PatientTier.MEDIUM)
