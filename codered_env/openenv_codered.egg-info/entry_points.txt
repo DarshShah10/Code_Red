@@ -1,0 +1,2 @@
+[console_scripts]
+server = codered_env.server.app:main
