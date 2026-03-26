@@ -1,18 +1,8 @@
-"""CodeRedEnv data models — full implementation in Task 3."""
-from pydantic import BaseModel
-from typing import Any
+"""CodeRedEnv — top-level model exports."""
+from .server.models import (
+    CodeRedAction,
+    CodeRedObservation,
+    CodeRedState,
+)
 
-
-class CodeRedAction(BaseModel):
-    """Placeholder — full implementation in Task 3."""
-    pass
-
-
-class CodeRedObservation(BaseModel):
-    """Placeholder — full implementation in Task 3."""
-    pass
-
-
-class CodeRedState(BaseModel):
-    """Placeholder — full implementation in Task 3."""
-    pass
+__all__ = ["CodeRedAction", "CodeRedObservation", "CodeRedState"]
