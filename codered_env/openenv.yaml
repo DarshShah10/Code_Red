@@ -1,8 +1,20 @@
 spec_version: 1
-name: codered_env
-type: space
-runtime: fastapi
 app: server.app:app
-port: 8000
-version: "0.1.0"
-description: "CodeRedEnv — Emergency Medical Coordination Environment for OpenEnv. Simulates ambulance dispatch, hospital resource preparation, and multi-patient triage in Prakashnagar."
+
+meta:
+  name: CodeRedEnv
+  description: Emergency medical coordination simulation for RL agents
+  author: Darsh
+  license: Apache-2.0
+  tags:
+    - openenv
+    - healthcare
+    - reinforcement-learning
+    - emergency-response
+    - medical
+  hyperparameters:
+    task_ids:
+      - task1
+      - task2
+      - task3
+    max_episode_steps: 30
