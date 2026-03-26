@@ -7,9 +7,16 @@ from .models import (
 )
 from .client import CodeRedEnv
 
+try:
+    from . import baseline
+    run_baseline_agent = baseline.run_baseline_agent
+except ImportError:
+    run_baseline_agent = None
+
 __all__ = [
     "CodeRedAction",
     "CodeRedObservation",
     "CodeRedState",
     "CodeRedEnv",
+    "run_baseline_agent",
 ]
