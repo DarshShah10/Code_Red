@@ -241,6 +241,23 @@ def _name_to_action(name: str, args: dict) -> dict:
     return {"action_type": "maintain_plan"}
 
 
+def _build_response_kwargs(model: str, prompt: str) -> dict:
+    """Build kwargs for openai.responses.create(), handling gpt-5 reasoning models."""
+    kwargs = {
+        "model": model,
+        "input": prompt,
+        "instructions": SYSTEM_PROMPT,
+        "tools": FUNCTIONS,
+        "tool_choice": "auto",
+    }
+    # gpt-5 reasoning models only support temperature when reasoning=effort:none
+    # For baseline determinism, disable reasoning and set temperature=0
+    if model.startswith("gpt-5"):
+        kwargs["reasoning"] = {"effort": "none"}
+        kwargs["temperature"] = 0.0
+    return kwargs
+
+
 def run_baseline_agent(task_id: Literal["task1", "task2", "task3"], seed: int, api_key: str | None = None, model: str | None = None) -> float:
     """
     Run the OpenAI API baseline agent on a given task and seed.
@@ -254,7 +271,7 @@ def run_baseline_agent(task_id: Literal["task1", "task2", "task3"], seed: int, a
     if api_key is None:
         api_key = os.environ.get("OPENAI_API_KEY")
     if model is None:
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        model = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
     if not api_key:
         raise ValueError("OPENAI_API_KEY not set — pass api_key or set in .env")
 
@@ -268,11 +285,7 @@ def run_baseline_agent(task_id: Literal["task1", "task2", "task3"], seed: int, a
 
         try:
             response = openai.responses.create(
-                model=model,
-                input=prompt,
-                instructions=SYSTEM_PROMPT,
-                tools=FUNCTIONS,
-                tool_choice="auto",
+                **_build_response_kwargs(model, prompt),
             )
         except Exception:
             # On API failure, maintain plan
