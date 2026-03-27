@@ -256,6 +256,7 @@ class CodeRedEnvironment(Environment):
                             "event": "treatment_complete",
                             "effective_time": effective_time,
                             "target_time": target_time,
+                            "vitals_at_treatment": patient.vitals_score,
                         })
                         del self._active_surgeries[patient_id]
 
