@@ -12,6 +12,7 @@ def test_task1_e2e():
     assert obs.step == 1
     assert len(obs.patients) == 1
     assert obs.patients[0].condition.value == "cardiac"
+    assert obs.patients[0].vitals_score == 1.0  # Phase 1: starts at 1.0
 
     # Take 10 steps with maintain_plan dummy
     for _ in range(10):
@@ -76,3 +77,4 @@ def test_grader_computes_score():
         assert 0.0 <= result.secondary_harm <= 1.0
         assert 0.0 <= result.prep_ready <= 1.0
         assert 0.0 <= result.mutual_aid_penalty <= 1.0
+        assert 0.0 <= result.vitals_score_avg <= 1.0  # Phase 1
