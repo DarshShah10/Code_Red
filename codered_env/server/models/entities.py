@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 class PatientStatus(str, Enum):
     WAITING = "waiting"
+    DETERIORATING = "deteriorating"  # Phase 1
+    CRITICAL = "critical"              # Phase 1
     DISPATCHED = "dispatched"
     TRANSPORTING = "transporting"
     TREATING = "treating"
@@ -38,6 +40,7 @@ class Patient(BaseModel):
     assigned_ambulance: Optional[str] = None
     assigned_hospital: Optional[str] = None
     status: PatientStatus = PatientStatus.WAITING
+    vitals_score: float = Field(default=1.0, ge=0.0, le=1.0)
     blood_type: Optional[str] = None  # None = unknown until QueryBloodType
     treatment_start_time: Optional[int] = None
     treatment_complete_time: Optional[int] = None
