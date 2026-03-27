@@ -53,7 +53,7 @@ from codered_env import run_baseline_agent
 score = run_baseline_agent(
     task_id="task1",
     seed=0,
-    api_key="sk-your-key"
+    # api_key and model read from .env if not passed
 )
 ```
 
