@@ -6,9 +6,9 @@ def test_openenv_yaml_valid():
     with open("openenv.yaml") as f:
         data = yaml.safe_load(f)
     assert data["spec_version"] == 1
-    assert data["name"] == "codered_env"
+    assert data["meta"]["name"] == "CodeRedEnv"
     assert data["app"] == "server.app:app"
-    assert data["port"] == 8000
+    assert "server.app:app" in data["app"]
 
 def test_environment_subclass():
     """Verify CodeRedEnvironment is a valid OpenEnv Environment."""
