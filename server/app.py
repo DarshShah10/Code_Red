@@ -1,5 +1,6 @@
 """FastAPI application for CodeRedEnv with API endpoints."""
 
+import os
 from dataclasses import asdict
 from typing import Literal
 
@@ -117,7 +118,8 @@ async def grade_task(req: GraderRequest) -> dict:
 
 class BaselineRequest(BaseModel):
     task_id: Literal["task1", "task2", "task3"]
-    openai_api_key: str
+    openai_api_key: str | None = None
+    model: str | None = None
 
 
 @app.post("/baseline")
@@ -135,7 +137,8 @@ async def run_baseline(req: BaselineRequest) -> dict:
     for seed in [0, 1, 2]:
         try:
             score = baseline_module.run_baseline_agent(
-                task_id=req.task_id, seed=seed, api_key=req.openai_api_key
+                task_id=req.task_id, seed=seed,
+                api_key=req.openai_api_key, model=req.model
             )
             scores.append(score)
         except Exception as e:
@@ -143,6 +146,7 @@ async def run_baseline(req: BaselineRequest) -> dict:
 
     return {
         "task_id": req.task_id,
+        "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
         "scores": scores,
         "mean": sum(scores) / len(scores) if scores else 0.0,
     }

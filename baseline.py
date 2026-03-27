@@ -1,6 +1,14 @@
 """OpenAI-powered baseline agent for CodeRedEnv."""
+import os
 from typing import Literal, List
 import openai
+
+# Load .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # OpenAI function definitions matching all action types
 FUNCTIONS = [
@@ -233,13 +241,22 @@ def _name_to_action(name: str, args: dict) -> dict:
     return {"action_type": "maintain_plan"}
 
 
-def run_baseline_agent(task_id: Literal["task1", "task2", "task3"], seed: int, api_key: str) -> float:
+def run_baseline_agent(task_id: Literal["task1", "task2", "task3"], seed: int, api_key: str | None = None, model: str | None = None) -> float:
     """
     Run the OpenAI API baseline agent on a given task and seed.
     Returns the rubric final_score (0.0-1.0).
+
+    Reads OPENAI_API_KEY and OPENAI_MODEL from environment if not passed.
     """
     from codered_env.server.codered_environment import CodeRedEnvironment
     from codered_env.server.grader import grade_from_environment
+
+    if api_key is None:
+        api_key = os.environ.get("OPENAI_API_KEY")
+    if model is None:
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not set — pass api_key or set in .env")
 
     openai.api_key = api_key
 
@@ -251,7 +268,7 @@ def run_baseline_agent(task_id: Literal["task1", "task2", "task3"], seed: int, a
 
         try:
             response = openai.responses.create(
-                model="gpt-4o",
+                model=model,
                 input=prompt,
                 instructions=SYSTEM_PROMPT,
                 tools=FUNCTIONS,

@@ -64,6 +64,10 @@ class CodeRedEnvironment(Environment):
         self._pending_or_queries: Dict[str, int] = {}
         self._active_disruptions: List[Dict] = []
         self._episode_log: List[dict] = []
+        # Track active surgeries for treatment_complete detection
+        self._active_surgeries: Dict[str, Dict] = {}  # patient_id -> {hosp_id, or_index, start_step}
+        # Track pending mutual aid for arrival detection
+        self._pending_mutual_aid: Dict[str, int] = {}  # ambulance_id -> arrival_step
 
     # =========================================================================
     # Public API
@@ -112,15 +116,19 @@ class CodeRedEnvironment(Environment):
         self._pending_or_queries = {}
         self._active_disruptions = []
         self._episode_log = []
+        self._active_surgeries = {}
+        self._pending_mutual_aid = {}
 
         # Log patient creation
         for p in self._patients:
+            target_time = PATIENT_TARGET_TIMES.get(p.condition, 60)
             self._episode_log.append({
                 "step": 0,
                 "patient_id": p.id,
                 "event": "patient_created",
                 "condition": p.condition,
                 "is_secondary": False,
+                "target_time": target_time,
             })
 
         return self._build_observation()
@@ -194,8 +202,89 @@ class CodeRedEnvironment(Environment):
                     if patient and patient.status == "transporting":
                         self._do_treatment_arrival(patient, amb_id)
 
+        # Mutual aid arrival detection
+        for ma_id, arrival_step in list(self._pending_mutual_aid.items()):
+            if self._state.step_count >= arrival_step:
+                self._episode_log.append({
+                    "step": self._state.step_count,
+                    "event": "mutual_aid_arrived",
+                    "ambulance_id": ma_id,
+                    "actual_arrival_step": self._state.step_count,
+                })
+                del self._pending_mutual_aid[ma_id]
+
         # Hospitals
+        # Capture active surgery patient IDs BEFORE tick to detect completions
+        pre_tick_surgery_patients = set(self._active_surgeries.keys())
+
         self._hospital_system.tick()
+
+        # After tick: detect completed surgeries (OR patient_id cleared)
+        for patient_id in list(pre_tick_surgery_patients):
+            if patient_id not in self._active_surgeries:
+                continue  # already handled
+            surgery_info = self._active_surgeries[patient_id]
+            hosp = self._hospital_system.get(surgery_info["hospital_id"])
+            if hosp:
+                or_obj = next(
+                    (o for o in hosp.operating_rooms if o.index == surgery_info["or_index"]),
+                    None,
+                )
+                if or_obj and or_obj.status == "idle" and or_obj.patient_id is None:
+                    # Surgery just completed
+                    patient = self._patient_manager.get(patient_id)
+                    if patient and patient.status == "in_treatment":
+                        effective_time = self._state.step_count - surgery_info["start_step"]
+                        target_time = PATIENT_TARGET_TIMES.get(patient.condition, 60)
+                        self._patient_manager.mark_treated(patient_id, effective_time)
+                        self._episode_log.append({
+                            "step": self._state.step_count,
+                            "patient_id": patient_id,
+                            "event": "treatment_complete",
+                            "effective_time": effective_time,
+                            "target_time": target_time,
+                        })
+                        del self._active_surgeries[patient_id]
+
+        # After hospital tick: check if any waiting patient can now start surgery
+        for patient in self._patients:
+            if (
+                patient.status == "in_treatment"
+                and patient.assigned_hospital
+                and patient.id not in self._active_surgeries
+            ):
+                hosp = self._hospital_system.get(patient.assigned_hospital)
+                if hosp:
+                    idle_or = self._hospital_system.get_idle_or(patient.assigned_hospital)
+                    if idle_or:
+                        procedure_map = {
+                            "cardiac": "cardiac",
+                            "stroke": "stroke",
+                            "trauma": "trauma",
+                            "general": "general",
+                        }
+                        procedure_type = procedure_map.get(patient.condition, "general")
+                        result = self._hospital_system.start_surgery(
+                            patient.assigned_hospital,
+                            idle_or.index,
+                            procedure_type,
+                            patient.id,
+                            duration_minutes=30,
+                        )
+                        if result["success"]:
+                            self._active_surgeries[patient.id] = {
+                                "hospital_id": patient.assigned_hospital,
+                                "or_index": idle_or.index,
+                                "start_step": self._state.step_count,
+                                "procedure_type": procedure_type,
+                            }
+                            self._episode_log.append({
+                                "step": self._state.step_count,
+                                "patient_id": patient.id,
+                                "event": "treatment_started",
+                                "hospital_id": patient.assigned_hospital,
+                                "or_index": idle_or.index,
+                            })
 
         # Blood bank
         self._blood_bank.tick()
@@ -258,18 +347,41 @@ class CodeRedEnvironment(Environment):
         if patient.assigned_hospital:
             hosp = self._hospital_system.get(patient.assigned_hospital)
             if hosp:
-                # Start surgery/treatment
-                idle_or = self._hospital_system.get_idle_or(patient.assigned_hospital)
-                if idle_or:
-                    # Determine procedure type based on condition
-                    procedure_map = {
-                        "cardiac": "cardiac",
-                        "stroke": "stroke",
-                        "trauma": "trauma",
-                        "general": "general",
-                    }
-                    procedure_type = procedure_map.get(patient.condition, "general")
+                # Determine procedure type based on condition
+                procedure_map = {
+                    "cardiac": "cardiac",
+                    "stroke": "stroke",
+                    "trauma": "trauma",
+                    "general": "general",
+                }
+                procedure_type = procedure_map.get(patient.condition, "general")
 
+                # Check OR and specialist availability
+                idle_or = self._hospital_system.get_idle_or(patient.assigned_hospital)
+                # Determine required specialist type
+                specialist_map = {
+                    "cardiac": "cardiologist",
+                    "stroke": "neurologist",
+                    "trauma": "surgeon",
+                    "general": "general_surgeon",
+                }
+                specialist_type = specialist_map.get(patient.condition, "general_surgeon")
+                specialist_available = self._hospital_system.is_specialist_available(
+                    patient.assigned_hospital, specialist_type
+                )
+
+                # Log patient_arrived_hospital event
+                self._episode_log.append({
+                    "step": self._state.step_count,
+                    "patient_id": patient.id,
+                    "event": "patient_arrived_hospital",
+                    "hospital_id": patient.assigned_hospital,
+                    "or_ready": idle_or is not None,
+                    "specialist_available": specialist_available,
+                })
+
+                # Start surgery/treatment if OR available
+                if idle_or:
                     # Start surgery
                     result = self._hospital_system.start_surgery(
                         patient.assigned_hospital,
@@ -280,6 +392,14 @@ class CodeRedEnvironment(Environment):
                     )
                     if result["success"]:
                         patient.status = "in_treatment"
+                        patient.arrival_hospital_step = self._state.step_count
+                        # Track active surgery for treatment_complete detection
+                        self._active_surgeries[patient.id] = {
+                            "hospital_id": patient.assigned_hospital,
+                            "or_index": idle_or.index,
+                            "start_step": self._state.step_count,
+                            "procedure_type": procedure_type,
+                        }
                         self._episode_log.append({
                             "step": self._state.step_count,
                             "patient_id": patient.id,
@@ -336,6 +456,13 @@ class CodeRedEnvironment(Environment):
         )
         if not result["success"]:
             self._alerts.append(f"Dispatch failed: {result['reason']}")
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_dispatch",
+                "ambulance_id": action.ambulance_id,
+                "result": "wasted",
+                "reason": result["reason"],
+            })
             return
 
         # If patient at target node, assign
@@ -357,6 +484,16 @@ class CodeRedEnvironment(Environment):
                 "patient_id": waiting_patient.id,
                 "event": "dispatch",
                 "ambulance_id": action.ambulance_id,
+                "result": "success",
+            })
+        else:
+            # Dispatched but no patient at location
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_dispatch",
+                "ambulance_id": action.ambulance_id,
+                "target_node": action.target_node,
+                "result": "wasted",
             })
 
     def _do_prepare_or(self, action) -> None:
@@ -364,12 +501,22 @@ class CodeRedEnvironment(Environment):
         result = self._hospital_system.prepare_or(action.hospital_id, action.procedure_type)
         if not result["success"]:
             self._alerts.append(f"PrepareOR failed: {result['reason']}")
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_prepare_or",
+                "hospital_id": action.hospital_id,
+                "procedure_type": action.procedure_type,
+                "result": "wasted",
+                "reason": result["reason"],
+            })
             return
         self._episode_log.append({
             "step": self._state.step_count,
             "event": "action_prepare_or",
             "hospital_id": action.hospital_id,
+            "procedure_type": action.procedure_type,
             "or_index": result["or_index"],
+            "result": "success",
         })
 
     def _do_page_specialist(self, action) -> None:
@@ -377,7 +524,22 @@ class CodeRedEnvironment(Environment):
         result = self._hospital_system.page_specialist(action.hospital_id, action.specialist_type)
         if not result["success"]:
             self._alerts.append(f"PageSpecialist failed: {result['reason']}")
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_page_specialist",
+                "hospital_id": action.hospital_id,
+                "specialist_type": action.specialist_type,
+                "result": "wasted",
+                "reason": result["reason"],
+            })
             return
+        self._episode_log.append({
+            "step": self._state.step_count,
+            "event": "action_page_specialist",
+            "hospital_id": action.hospital_id,
+            "specialist_type": action.specialist_type,
+            "result": "success",
+        })
 
     def _do_assign_hospital(self, action) -> None:
         from .models.actions import AssignHospital
@@ -415,18 +577,56 @@ class CodeRedEnvironment(Environment):
             )
             if not result["success"]:
                 self._alerts.append(f"AllocateBlood failed: {result['reason']}")
+                self._episode_log.append({
+                    "step": self._state.step_count,
+                    "event": "action_allocate_blood",
+                    "hospital_id": action.hospital_id,
+                    "patient_id": action.patient_id,
+                    "blood_type": action.blood_type,
+                    "units": action.units,
+                    "result": "wasted",
+                    "reason": result["reason"],
+                })
                 return
             self._alerts.append(
                 f"Emergency blood: {result['units']} units {result['blood_type']} released for {action.patient_id} "
                 f"at {action.hospital_id}"
             )
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_allocate_blood",
+                "hospital_id": action.hospital_id,
+                "patient_id": action.patient_id,
+                "blood_type": action.blood_type,
+                "units": action.units,
+                "result": "success",
+            })
         else:
             result = self._blood_bank.start_crossmatch(
                 action.hospital_id, action.patient_id, action.blood_type, action.units
             )
             if not result["success"]:
                 self._alerts.append(f"AllocateBlood failed: {result['reason']}")
+                self._episode_log.append({
+                    "step": self._state.step_count,
+                    "event": "action_allocate_blood",
+                    "hospital_id": action.hospital_id,
+                    "patient_id": action.patient_id,
+                    "blood_type": action.blood_type,
+                    "units": action.units,
+                    "result": "wasted",
+                    "reason": result["reason"],
+                })
                 return
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_allocate_blood",
+                "hospital_id": action.hospital_id,
+                "patient_id": action.patient_id,
+                "blood_type": action.blood_type,
+                "units": action.units,
+                "result": "success",
+            })
 
     def _do_transfer_blood(self, action) -> None:
         from .models.actions import TransferBlood
@@ -448,11 +648,11 @@ class CodeRedEnvironment(Environment):
             return
         self._state.mutual_aid_available -= 1
         self._state.mutual_aid_used += 1
-        import random
-        non_hospital = [n["id"] for n in CITY_NODES if n["type"] != "hospital"]
         new_id = f"MUTUAL_{self._state.mutual_aid_used}"
-        # Note: Mutual aid ambulance would need to be added to ambulance_manager
-        # For now, just track it in episode log
+        # Calculate optimal arrival step: 12 steps from now (travel time estimate)
+        optimal_arrival_step = self._state.step_count + 12
+        # Track for arrival detection
+        self._pending_mutual_aid[new_id] = optimal_arrival_step
         self._alerts.append(
             f"Mutual aid requested: {new_id} available as reserve"
         )
@@ -460,6 +660,7 @@ class CodeRedEnvironment(Environment):
             "step": self._state.step_count,
             "event": "mutual_aid_called",
             "ambulance_id": new_id,
+            "optimal_arrival_step": optimal_arrival_step,
         })
 
     def _do_query_blood_type(self, action) -> None:
