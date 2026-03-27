@@ -13,6 +13,7 @@ class RubricResult:
     mutual_aid_penalty: float  # 0.0–1.0, subtracted from final_score
     final_score: float    # weighted sum minus mutual_aid_penalty
     breakdown: dict        # human-readable per-axis details
+    vitals_score_avg: float = 0.0  # Phase 1: informational only
 
     def __post_init__(self):
         if self.breakdown is None:
@@ -27,6 +28,7 @@ class RubricResult:
             "mutual_aid_penalty": self.mutual_aid_penalty,
             "final_score": self.final_score,
             "breakdown": self.breakdown,
+            "vitals_score_avg": self.vitals_score_avg,
         }
 
 
@@ -78,6 +80,16 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         time_score = sum(scores) / len(scores) if scores else 1.0
     else:
         time_score = 1.0
+
+    # =========================================================================
+    # VITALS SCORE AVERAGE (informational — not yet in final_score)
+    # =========================================================================
+    # Capture vitals at treatment from treatment_complete events
+    vitals_scores = []
+    for entry in episode_log:
+        if entry.get("event") == "treatment_complete":
+            vitals_scores.append(entry.get("vitals_at_treatment", 1.0))
+    vitals_score_avg = sum(vitals_scores) / len(vitals_scores) if vitals_scores else 1.0
 
     # =========================================================================
     # EFFICIENCY (20% weight)
@@ -183,6 +195,7 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         mutual_aid_penalty=round(mutual_aid_penalty, 4),
         final_score=round(final_score, 4),
         breakdown=breakdown,
+        vitals_score_avg=round(vitals_score_avg, 4),
     )
 
 
