@@ -68,6 +68,9 @@ class CodeRedEnvironment(Environment):
         self._active_surgeries: Dict[str, Dict] = {}  # patient_id -> {hosp_id, or_index, start_step}
         # Track pending mutual aid for arrival detection
         self._pending_mutual_aid: Dict[str, int] = {}  # ambulance_id -> arrival_step
+        # Prev snapshots for dense reward computation
+        self._prev_vitals: Dict[str, float] = {}
+        self._prev_patient_status: Dict[str, str] = {}
 
     # =========================================================================
     # Public API
@@ -118,6 +121,8 @@ class CodeRedEnvironment(Environment):
         self._episode_log = []
         self._active_surgeries = {}
         self._pending_mutual_aid = {}
+        self._prev_vitals = {}
+        self._prev_patient_status = {}
 
         # Log patient creation
         for p in self._patients:
@@ -130,6 +135,11 @@ class CodeRedEnvironment(Environment):
                 "is_secondary": False,
                 "target_time": target_time,
             })
+
+        # Snapshot vitals and status for reward computation
+        for p in self._patients:
+            self._prev_vitals[p.id] = p.vitals_score
+            self._prev_patient_status[p.id] = p.status
 
         return self._build_observation()
 
@@ -174,7 +184,10 @@ class CodeRedEnvironment(Environment):
     def _advance_time(self) -> None:
         """Advance all systems by 1 minute."""
         # Patient deterioration + outcome check
-        self._patient_manager.tick()
+        self._patient_manager.tick(
+            self._patient_manager.get_onset_steps(),
+            self._state.step_count
+        )
         # Check for patient deaths/outcomes
         for p in self._patients:
             if p.status == "deceased" and not any(
@@ -711,11 +724,52 @@ class CodeRedEnvironment(Environment):
         if len(non_terminal) == 0:
             self._state.all_patients_terminal = True
             return True
+        # Early termination: all non-deceased patients have vitals_score <= 0
+        alive = [p for p in self._patients if p.status not in ("treated", "deceased")]
+        if alive and all(p.vitals_score <= 0.0 for p in alive):
+            self._state.all_patients_terminal = True
+            return True
         return False
 
     def _compute_step_reward(self) -> float:
-        """Dense reward based on time_score_preview delta."""
-        return -0.01
+        """Dense reward: vitals delta shaping + milestone bonuses/penalties."""
+        reward = 0.0
+        from .subsystems.constants import (
+            VITALS_DELTA_WEIGHT, MILESTONE_REWARDS, REWARD_STEP_CLAMP
+        )
+
+        for pid, prev in self._prev_vitals.items():
+            curr_patient = self._patient_manager.patients_dict.get(pid)
+            if curr_patient is None:
+                continue
+            # Vitals delta shaping
+            reward += (curr_patient.vitals_score - prev) * VITALS_DELTA_WEIGHT
+
+        # Milestone bonuses/penalties
+        for pid, prev_status in self._prev_patient_status.items():
+            curr_patient = self._patient_manager.patients_dict.get(pid)
+            if curr_patient is None:
+                continue
+            curr_status = curr_patient.status
+            if prev_status == "waiting" and curr_status == "dispatched":
+                reward += MILESTONE_REWARDS["dispatched"]
+            if prev_status == "dispatched" and curr_status == "in_treatment":
+                reward += MILESTONE_REWARDS["in_treatment"]
+            if curr_status == "treated":
+                reward += MILESTONE_REWARDS["treated"]
+            if curr_status == "deceased":
+                reward += MILESTONE_REWARDS["deceased"]
+
+        # Snapshot for next step
+        self._prev_vitals = {
+            p.id: p.vitals_score for p in self._patient_manager.patients
+        }
+        self._prev_patient_status = {
+            p.id: p.status for p in self._patient_manager.patients
+        }
+
+        lo, hi = REWARD_STEP_CLAMP
+        return max(lo, min(hi, reward))
 
     def _compute_time_score_preview(self) -> float:
         """Running estimate of time_score axis."""
@@ -748,6 +802,8 @@ class CodeRedEnvironment(Environment):
         def _map_patient_status(s):
             mapping = {
                 "waiting": PatientStatus.WAITING,
+                "deteriorating": PatientStatus.DETERIORATING,
+                "critical": PatientStatus.CRITICAL,
                 "dispatched": PatientStatus.DISPATCHED,
                 "transporting": PatientStatus.TRANSPORTING,
                 "in_treatment": PatientStatus.TREATING,
@@ -767,6 +823,7 @@ class CodeRedEnvironment(Environment):
                 assigned_ambulance=p.assigned_hospital,  # Will be set by ambulance manager
                 assigned_hospital=p.assigned_hospital,
                 status=_map_patient_status(p.status),
+                vitals_score=p.vitals_score,
                 blood_type=p.blood_type,
                 treatment_start_time=p.arrival_hospital_step,
                 treatment_complete_time=p.treatment_complete_time,
@@ -863,6 +920,11 @@ class CodeRedEnvironment(Environment):
             alerts=list(self._alerts),
             mutual_aid_remaining=self._state.mutual_aid_available,
             time_score_preview=round(self._compute_time_score_preview(), 4),
+            vitals_score_preview=round(
+                sum(p.vitals_score for p in self._patients if p.status not in ("treated", "deceased"))
+                / max(1, sum(1 for p in self._patients if p.status not in ("treated", "deceased"))),
+                4
+            ),
             patients_remaining=len([
                 p for p in self._patients
                 if p.status not in ("treated", "deceased")
