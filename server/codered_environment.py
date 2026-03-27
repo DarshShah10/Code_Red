@@ -738,6 +738,10 @@ class CodeRedEnvironment(Environment):
             VITALS_DELTA_WEIGHT, MILESTONE_REWARDS, REWARD_STEP_CLAMP
         )
 
+        # Guard: no reward computation once all patients are terminal
+        if self._state.all_patients_terminal:
+            return 0.0
+
         for pid, prev in self._prev_vitals.items():
             curr_patient = self._patient_manager.patients_dict.get(pid)
             if curr_patient is None:
@@ -755,9 +759,9 @@ class CodeRedEnvironment(Environment):
                 reward += MILESTONE_REWARDS["dispatched"]
             if prev_status == "dispatched" and curr_status == "in_treatment":
                 reward += MILESTONE_REWARDS["in_treatment"]
-            if curr_status == "treated":
+            if prev_status != "treated" and curr_status == "treated":
                 reward += MILESTONE_REWARDS["treated"]
-            if curr_status == "deceased":
+            if prev_status != "deceased" and curr_status == "deceased":
                 reward += MILESTONE_REWARDS["deceased"]
 
         # Snapshot for next step
