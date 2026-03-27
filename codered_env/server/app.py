@@ -146,7 +146,7 @@ async def run_baseline(req: BaselineRequest) -> dict:
 
     return {
         "task_id": req.task_id,
-        "model": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        "model": os.environ.get("OPENAI_MODEL", "gpt-5-nano"),
         "scores": scores,
         "mean": sum(scores) / len(scores) if scores else 0.0,
     }
