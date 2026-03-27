@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class PatientStatus(str, Enum):
     WAITING = "waiting"
     DETERIORATING = "deteriorating"  # Phase 1
-    CRITICAL = "critical"              # Phase 1
+    CRITICAL = "critical"           # Phase 1
     DISPATCHED = "dispatched"
     TRANSPORTING = "transporting"
     TREATING = "treating"
