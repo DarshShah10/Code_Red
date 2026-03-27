@@ -41,5 +41,11 @@ class CodeRedObservation(Observation):
         default=0,
         description="Non-terminal patient count"
     )
+    vitals_score_preview: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Average vitals of all active (non-terminal) patients"
+    )
 
     model_config = {"extra": "forbid"}
