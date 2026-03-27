@@ -1,3 +1,5 @@
+import random
+
 import pytest
 from codered_env.server.subsystems.patient_manager import PatientManager
 
@@ -26,7 +28,6 @@ def test_mark_deceased_sets_outcome():
 
 def test_patients_from_task2():
     pm = PatientManager()
-    import random
     rng = random.Random(0)
     pm.reset(task_id="task2", rng=rng)
     assert len(pm.patients) >= 2  # cardiac + stroke
@@ -34,9 +35,7 @@ def test_patients_from_task2():
 
 def test_patient_vitals_decline_post_target():
     """Vitals decay after effective_time exceeds target_time."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
     pm = PatientManager()
-    import random
     rng = random.Random(0)
     pm.reset(task_id="task1", rng=rng)  # task1: cardiac, target=90min
     patient = pm.patients[0]
@@ -47,7 +46,7 @@ def test_patient_vitals_decline_post_target():
     # Steps 0-90: vitals stay near 1.0 (stable window)
     for step in range(1, 91):
         pm.tick(onset_steps, step)
-    assert patient.vitals_score == pytest.approx(1.0, abs=0.05)
+    assert patient.vitals_score == pytest.approx(1.0, abs=1e-6)
 
     # Step 91: first post-target tick — vitals should be ~0.99 (22.5/90 overtime)
     pm.tick(onset_steps, 91)
@@ -64,9 +63,7 @@ def test_patient_vitals_decline_post_target():
 
 def test_patient_vitals_freeze_on_treatment():
     """Vitals freeze at treatment time, no further decay."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
     pm = PatientManager()
-    import random
     rng = random.Random(0)
     pm.reset(task_id="task1", rng=rng)
     patient = pm.patients[0]
@@ -92,9 +89,7 @@ def test_patient_vitals_freeze_on_treatment():
 
 def test_patient_status_escalation():
     """Patient status escalates from waiting→deteriorating→critical at thresholds."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
     pm = PatientManager()
-    import random
     rng = random.Random(0)
     pm.reset(task_id="task1", rng=rng)  # cardiac target=90
     patient = pm.patients[0]
@@ -106,19 +101,17 @@ def test_patient_status_escalation():
     # Advance to deteriorating threshold (vitals <= 0.75)
     for step in range(1, 120):
         pm.tick(onset_steps, step)
-    assert patient.status in ("waiting", "deteriorating")
+    assert patient.status == "deteriorating", f"Expected deteriorating at step 119, got {patient.status} (vitals={patient.vitals_score:.3f})"
 
     # Advance to critical threshold (vitals <= 0.4)
     for step in range(120, 160):
         pm.tick(onset_steps, step)
-    assert patient.status in ("deteriorating", "critical")
+    assert patient.status == "critical", f"Expected critical at step 159, got {patient.status} (vitals={patient.vitals_score:.3f})"
 
 
 def test_patient_death_at_zero_vitals():
     """Patient marked deceased when vitals reach 0.0."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
     pm = PatientManager()
-    import random
     rng = random.Random(0)
     pm.reset(task_id="task1", rng=rng)  # cardiac target=90, death at step 180
     patient = pm.patients[0]
