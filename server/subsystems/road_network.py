@@ -33,14 +33,20 @@ class RoadNetwork:
     """City road network with routing, congestion, and disruption support."""
 
     def __init__(self):
-        from .constants import CITY_NODES, CITY_EDGES
+        from .constants import CITY_NODES, CITY_EDGES, CONGESTION_CURVES, EPISODE_START_HOUR
 
         self.node_ids: List[str] = [n["id"] for n in CITY_NODES]
         self._edges: Dict[str, Edge] = {}
+        self._congestion_curves: dict = CONGESTION_CURVES
+        self._episode_start_hour: int = EPISODE_START_HOUR
+        self._step_count: int = 0  # tracks elapsed minutes for TOD
 
         for edge in CITY_EDGES:
             key = self._edge_key(edge["from"], edge["to"])
             self._edges[key] = Edge(edge["from"], edge["to"], edge["base_time"])
+
+        # Apply initial TOD congestion
+        self._apply_tod_congestion()
 
     # =========================================================================
     # Public API
@@ -123,9 +129,30 @@ class RoadNetwork:
             edge.congestion_multiplier = 1.0
 
     def tick(self) -> None:
-        """Advance all edge disruptions by 1 minute."""
+        """Advance all edge disruptions by 1 minute and update TOD congestion."""
+        self._step_count += 1
+        self._apply_tod_congestion()
         for edge in self._edges.values():
             edge.tick()
+
+    def _apply_tod_congestion(self) -> None:
+        """
+        Recompute congestion multipliers for all edges based on current time of day.
+        Disruptions (accident/road_closure) override TOD multipliers.
+        """
+        from .constants import interpolate_congestion
+
+        hour = (self._episode_start_hour + self._step_count // 60) % 24
+        frac_hour = hour + (self._step_count % 60) / 60.0  # fractional hour
+
+        for key, edge in self._edges.items():
+            # Skip edges with active disruptions — disruptions set their own multipliers
+            if edge.disrupted:
+                continue
+            # Try both node IDs as curve keys
+            curve = self._congestion_curves.get(edge.from_node, [])
+            multiplier = interpolate_congestion(curve, frac_hour)
+            edge.congestion_multiplier = multiplier
 
     def get_active_disruptions(self) -> List[Dict]:
         """Return list of currently disrupted edges."""

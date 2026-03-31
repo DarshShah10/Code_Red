@@ -208,6 +208,63 @@ HOSPITAL_MORTALITY_RATES: dict[str, dict[str, float]] = {
 }
 
 # =============================================================================
+# TIME-OF-DAY CONGESTION CURVES — Task 14
+# Maps edge key to list of (hour, multiplier) pairs.
+# Hour 0 = midnight, episode start = 8am (hour 8).
+# NH45_BYPASS: heavy morning (7-9) and evening (17-20) peaks
+# Railway crossing: unpredictable due to gate
+# =============================================================================
+
+CONGESTION_CURVES: dict[str, list[tuple[int, float]]] = {
+    # Format: "NH45_BYPASS" applies to both directions of NH45 bypass
+    "NH45_BYPASS": [
+        (0, 0.8), (5, 0.8), (6, 1.2), (7, 1.8), (8, 2.0),
+        (9, 1.5), (10, 1.2), (16, 1.3), (17, 1.9), (18, 2.1),
+        (19, 1.7), (20, 1.2), (22, 0.9), (23, 0.8),
+    ],
+    "RAILWAY_XING": [
+        # Railway crossing: slow all day, worse during peak
+        (0, 1.0), (7, 1.3), (8, 1.6), (9, 1.3),
+        (17, 1.5), (18, 1.8), (19, 1.4), (22, 1.0),
+    ],
+    "RING_ROAD": [
+        # Ring road: moderate peak
+        (0, 0.8), (7, 1.1), (8, 1.5), (9, 1.2),
+        (17, 1.4), (18, 1.6), (19, 1.2), (22, 0.9),
+    ],
+    # Default: all other edges use base multiplier 1.0
+}
+
+EPISODE_START_HOUR: int = 8  # 8am
+
+
+def interpolate_congestion(curve: list[tuple[int, float]], hour: float) -> float:
+    """
+    Interpolate a congestion multiplier for a given fractional hour.
+    Curve is sorted list of (hour, multiplier) breakpoints.
+    Returns multiplier at the given hour, or 1.0 if curve is empty.
+    """
+    if not curve:
+        return 1.0
+    # Wrap hour to [0, 24)
+    hour = hour % 24.0
+    # Before first breakpoint
+    if hour <= curve[0][0]:
+        return curve[0][1]
+    # After last breakpoint
+    if hour >= curve[-1][0]:
+        return curve[-1][1]
+    # Find surrounding breakpoints
+    for i in range(len(curve) - 1):
+        h0, m0 = curve[i]
+        h1, m1 = curve[i + 1]
+        if h0 <= hour < h1:
+            t = (hour - h0) / (h1 - h0)
+            return m0 + t * (m1 - m0)
+    return 1.0
+
+
+# =============================================================================
 # PATIENT VITALS — Phase 1
 # =============================================================================
 
