@@ -283,3 +283,44 @@ MILESTONE_REWARDS = {
     "deceased": -0.80,
 }
 REWARD_STEP_CLAMP = (-1.0, 1.0)
+
+# =============================================================================
+# SHIFT-BASED STAFFING — Task 15
+# Specialist available counts by shift. Night (22-06) has reduced staffing.
+# =============================================================================
+
+SHIFT_CONFIG: dict[str, dict[str, dict[str, int]]] = {
+    # Specialist available counts per hospital × shift.
+    # HOSP_C always has 0 specialists (stabilisation only).
+    "day": {
+        "HOSP_A": {"cardiologist": 2, "neurologist": 1, "trauma_surgeon": 2},
+        "HOSP_B": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_C": {},
+    },
+    "evening": {
+        "HOSP_A": {"cardiologist": 1, "neurologist": 1, "trauma_surgeon": 1},
+        "HOSP_B": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_C": {},
+    },
+    "night": {
+        "HOSP_A": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_B": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_C": {},
+    },
+}
+
+
+def get_current_shift(episode_start_hour: int, step_count: int) -> str:
+    """
+    Return shift name ('day', 'evening', 'night') for a given step count.
+    day:      06:00 – 13:59  (hours 6-13)
+    evening:  14:00 – 21:59  (hours 14-21)
+    night:    22:00 – 05:59  (hours 22-23, 0-5)
+    """
+    hour = (episode_start_hour + step_count // 60) % 24
+    if 6 <= hour < 14:
+        return "day"
+    elif 14 <= hour < 22:
+        return "evening"
+    else:
+        return "night"

@@ -30,6 +30,7 @@ from .subsystems.constants import (
     AMBULANCES,
     BLOOD_TYPES,
     CITY_NODES,
+    EPISODE_START_HOUR,
     HOSPITALS,
     HOSPITAL_MORTALITY_RATES,
     PATIENT_CONDITION_REQUIREMENTS,
@@ -54,7 +55,7 @@ class CodeRedEnvironment(Environment):
         self._rng: Optional[Any] = None
         self._patients: List[Patient] = []
         self._road_network = RoadNetwork()
-        self._hospital_system = HospitalSystem()
+        self._hospital_system = HospitalSystem(episode_start_hour=EPISODE_START_HOUR)
         self._blood_bank = BloodBankSystem()
         self._disruption_engine = DisruptionEngine()
         self._patient_manager = PatientManager()
@@ -100,7 +101,7 @@ class CodeRedEnvironment(Environment):
         from .subsystems.ambulance_manager import AmbulanceManager
 
         self._road_network = RoadNetwork()
-        self._hospital_system = HospitalSystem()
+        self._hospital_system = HospitalSystem(episode_start_hour=EPISODE_START_HOUR)
         self._blood_bank = BloodBankSystem()
         self._disruption_engine.reset(seed=seed or 0, task_id=task_id)
         self._patient_manager.reset(task_id, self._rng)
