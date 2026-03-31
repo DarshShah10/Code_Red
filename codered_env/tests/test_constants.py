@@ -74,3 +74,24 @@ def test_hospital_a_best_outcomes():
     hosp_b = HOSPITAL_MORTALITY_RATES["HOSP_B"]
     for cond in ["cardiac", "stroke", "trauma", "general"]:
         assert hosp_a[cond] <= hosp_b[cond], f"HOSP_A/{cond} not better than HOSP_B"
+
+
+def test_get_current_shift():
+    """get_current_shift returns correct shift based on hour."""
+    from codered_env.server.subsystems.constants import get_current_shift
+
+    assert get_current_shift(episode_start_hour=8, step_count=0) == "day"    # hour 8
+    assert get_current_shift(episode_start_hour=8, step_count=360) == "evening"  # hour 14
+    assert get_current_shift(episode_start_hour=8, step_count=840) == "night"   # hour 22
+    assert get_current_shift(episode_start_hour=8, step_count=900) == "night"   # hour 23
+    assert get_current_shift(episode_start_hour=8, step_count=1380) == "day"  # hour 7
+
+
+def test_shift_config_has_all_hospitals_and_shifts():
+    """SHIFT_CONFIG must cover HOSP_A, HOSP_B, HOSP_C for day/evening/night."""
+    from codered_env.server.subsystems.constants import SHIFT_CONFIG
+
+    for shift in ["day", "evening", "night"]:
+        assert shift in SHIFT_CONFIG
+        for hosp_id in ["HOSP_A", "HOSP_B", "HOSP_C"]:
+            assert hosp_id in SHIFT_CONFIG[shift], f"{shift}/{hosp_id} missing from SHIFT_CONFIG"
