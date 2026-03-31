@@ -207,5 +207,55 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
 
 
 def grade_from_environment(env) -> RubricResult:
-    """Grade from a CodeRedEnvironment instance."""
-    return grade_episode(env.get_episode_log())
+    """
+    Grade from a CodeRedEnvironment instance with cross-validation.
+
+    Compares the episode log against the environment's patient manager to detect
+    silent mismatches between treatment_complete events and patient outcomes.
+    Mismatches are penalised proportionally and exposed in the breakdown.
+    """
+    log = env.get_episode_log()
+
+    # =========================================================================
+    # CROSS-VALIDATION: treatment_complete events vs patient manager outcomes
+    # =========================================================================
+    patients = env._patient_manager.patients
+
+    logged_treated = {
+        e["patient_id"]
+        for e in log
+        if e.get("event") == "treatment_complete"
+    }
+    patients_saved = {p.id for p in patients if p.outcome == "saved"}
+    patients_deceased = {p.id for p in patients if p.outcome == "deceased"}
+
+    # 1. Patients marked as saved in patient manager but no treatment_complete log
+    treated_missing_log = patients_saved - logged_treated
+
+    # 2. Patients with treatment_complete event but outcome is "deceased"
+    treated_but_deceased = logged_treated & patients_deceased
+
+    # 3. Patients marked as saved but also marked deceased in patient manager
+    #    (this is an internal inconsistency in patient_manager)
+    saved_but_deceased = patients_saved & patients_deceased
+
+    num_mismatches = (
+        len(treated_missing_log)
+        + len(treated_but_deceased)
+        + len(saved_but_deceased)
+    )
+
+    # Expose in breakdown
+    cross_validation_penalty = min(1.0, 0.2 * num_mismatches)
+
+    # Grade from the log first
+    result = grade_episode(log)
+
+    # Apply cross-validation penalty
+    result.final_score = max(0.0, result.final_score - cross_validation_penalty)
+    result.breakdown["cross_validation_mismatches"] = num_mismatches
+    result.breakdown["cross_validation_penalty"] = round(cross_validation_penalty, 4)
+    result.breakdown["treated_missing_log"] = sorted(treated_missing_log)
+    result.breakdown["treated_but_deceased"] = sorted(treated_but_deceased)
+
+    return result
