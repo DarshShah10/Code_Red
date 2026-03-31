@@ -8,8 +8,8 @@ from .models import (
 from .client import CodeRedEnv
 
 try:
-    from . import baseline
-    run_baseline_agent = baseline.run_baseline_agent
+    from . import inference
+    run_baseline_agent = inference.run_baseline_agent
 except ImportError:
     run_baseline_agent = None
 

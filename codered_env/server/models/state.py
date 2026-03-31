@@ -26,4 +26,4 @@ class CodeRedState(State):
     disruptions_active: List[DisruptionState] = Field(default_factory=list)
     all_patients_terminal: bool = False
 
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "forbid"}

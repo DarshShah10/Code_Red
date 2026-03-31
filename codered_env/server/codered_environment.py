@@ -67,7 +67,9 @@ class CodeRedEnvironment(Environment):
         # Track active surgeries for treatment_complete detection
         self._active_surgeries: Dict[str, Dict] = {}  # patient_id -> {hosp_id, or_index, start_step}
         # Track pending mutual aid for arrival detection
-        self._pending_mutual_aid: Dict[str, int] = {}  # ambulance_id -> arrival_step
+        self._pending_mutual_aid: Dict[str, dict] = {}  # ambulance_id -> {arrival_step, patient_id, source_node}
+        # Track active mutual aid ambulances (temporary fleet entries)
+        self._active_ma_ambulances: Dict[str, dict] = {}  # ma_id -> {patient_id, status, hospital_id}
         # Prev snapshots for dense reward computation
         self._prev_vitals: Dict[str, float] = {}
         self._prev_patient_status: Dict[str, str] = {}
@@ -121,6 +123,7 @@ class CodeRedEnvironment(Environment):
         self._episode_log = []
         self._active_surgeries = {}
         self._pending_mutual_aid = {}
+        self._active_ma_ambulances = {}
         self._prev_vitals = {}
         self._prev_patient_status = {}
 
@@ -215,15 +218,69 @@ class CodeRedEnvironment(Environment):
                     if patient and patient.status == "transporting":
                         self._do_treatment_arrival(patient, amb_id)
 
+        # Mutual aid ambulances: simulate instant pickup + transport to hospital
+        for ma_id, ma_info in list(self._active_ma_ambulances.items()):
+            if ma_info["status"] == "transporting":
+                patient = self._patient_manager.get(ma_info["patient_id"])
+                if patient and patient.status == "transporting":
+                    # MA ambulance delivers patient to hospital
+                    self._do_treatment_arrival(patient, ma_id)
+                    # Clean up MA ambulance after delivery
+                    del self._active_ma_ambulances[ma_id]
+
         # Mutual aid arrival detection
-        for ma_id, arrival_step in list(self._pending_mutual_aid.items()):
-            if self._state.step_count >= arrival_step:
-                self._episode_log.append({
-                    "step": self._state.step_count,
-                    "event": "mutual_aid_arrived",
-                    "ambulance_id": ma_id,
-                    "actual_arrival_step": self._state.step_count,
-                })
+        for ma_id, ma_info in list(self._pending_mutual_aid.items()):
+            if self._state.step_count >= ma_info["arrival_step"]:
+                patient_id = ma_info["patient_id"]
+                patient = self._patient_manager.get(patient_id) if patient_id else None
+
+                # Auto-assign to highest-priority waiting patient if not pre-assigned
+                if patient is None or patient.status != "waiting":
+                    priority_order = ["cardiac", "stroke", "trauma", "general"]
+                    for cond in priority_order:
+                        candidates = [
+                            p for p in self._patients
+                            if p.status == "waiting" and p.condition == cond
+                        ]
+                        if candidates:
+                            patient = candidates[0]
+                            patient_id = patient.id
+                            ma_info["patient_id"] = patient_id
+                            break
+
+                if patient and patient.status == "waiting":
+                    # Auto-assign hospital based on patient condition
+                    hosp_id = self._auto_assign_ma_hospital(patient)
+                    patient.assigned_hospital = hosp_id
+                    patient.status = "transporting"
+                    patient.assigned_ambulance = ma_id
+                    self._active_ma_ambulances[ma_id] = {
+                        "patient_id": patient_id,
+                        "hospital_id": hosp_id,
+                        "status": "transporting",
+                    }
+                    self._episode_log.append({
+                        "step": self._state.step_count,
+                        "event": "mutual_aid_arrived",
+                        "ambulance_id": ma_id,
+                        "patient_id": patient_id,
+                        "actual_arrival_step": self._state.step_count,
+                    })
+                    self._alerts.append(
+                        f"Mutual aid {ma_id} arrived, assigned to {patient_id} → {hosp_id}"
+                    )
+                else:
+                    self._episode_log.append({
+                        "step": self._state.step_count,
+                        "event": "mutual_aid_arrived",
+                        "ambulance_id": ma_id,
+                        "patient_id": patient_id,
+                        "actual_arrival_step": self._state.step_count,
+                    })
+                    self._alerts.append(
+                        f"Mutual aid {ma_id} arrived but no waiting patient — wasted"
+                    )
+
                 del self._pending_mutual_aid[ma_id]
 
         # Hospitals
@@ -334,7 +391,27 @@ class CodeRedEnvironment(Environment):
         )
         for event in events:
             if event["target_type"] == "surge":
-                self._alerts.append(f"Surge event: additional patients arriving")
+                # Spawn 1-2 secondary patients on surge
+                num_secondary = self._rng.randint(1, 2)
+                conditions = self._rng.sample(["cardiac", "stroke", "trauma", "general"], k=num_secondary)
+                for cond in conditions:
+                    sec_patient = self._patient_manager.spawn_secondary(
+                        condition=cond,
+                        onset_step=self._state.step_count,
+                    )
+                    self._patients = self._patient_manager.patients
+                    # Snapshot vitals/status for reward computation
+                    self._prev_vitals[sec_patient.id] = sec_patient.vitals_score
+                    self._prev_patient_status[sec_patient.id] = sec_patient.status
+                    self._alerts.append(f"Surge: secondary patient {sec_patient.id} ({cond}) arrived")
+                    self._episode_log.append({
+                        "step": self._state.step_count,
+                        "patient_id": sec_patient.id,
+                        "event": "patient_created",
+                        "condition": cond,
+                        "is_secondary": True,
+                        "target_time": PATIENT_TARGET_TIMES.get(cond, 60),
+                    })
             else:
                 self._alerts.append(
                     f"Disruption: {event['disruption_type']} on {event['target']}"
@@ -350,10 +427,9 @@ class CodeRedEnvironment(Environment):
 
     def _reveal_blood_type(self, patient_id: str) -> None:
         """Reveal a patient's blood type."""
-        import random
         patient = self._patient_manager.get(patient_id)
         if patient:
-            patient.blood_type = random.choice(BLOOD_TYPES)
+            patient.blood_type = self._rng.choice(BLOOD_TYPES)
             self._alerts.append(f"Blood type revealed for {patient_id}: {patient.blood_type}")
 
     def _do_treatment_arrival(self, patient, ambulance_id: str) -> None:
@@ -663,17 +739,61 @@ class CodeRedEnvironment(Environment):
         self._state.mutual_aid_available -= 1
         self._state.mutual_aid_used += 1
         new_id = f"MUTUAL_{self._state.mutual_aid_used}"
-        # Calculate optimal arrival step: 12 steps from now (travel time estimate)
-        optimal_arrival_step = self._state.step_count + 12
-        # Track for arrival detection
-        self._pending_mutual_aid[new_id] = optimal_arrival_step
+
+        # Route through road network: MA ambulance enters from RAILWAY_XING (city center)
+        MA_SOURCE_NODE = "RAILWAY_XING"
+        SCENE_TIME = 15  # fixed on-scene time (minutes)
+
+        # Auto-assign to highest-priority waiting patient at call time
+        # Priority: CARDIAC > STROKE > TRAUMA > GENERAL
+        priority_order = ["cardiac", "stroke", "trauma", "general"]
+        target_patient = None
+        for cond in priority_order:
+            candidates = [
+                p for p in self._patients
+                if p.status == "waiting" and p.condition == cond
+            ]
+            if candidates:
+                target_patient = candidates[0]
+                break
+
+        if target_patient is None:
+            self._alerts.append(f"Mutual aid requested: {new_id} — no waiting patients")
+            # Still track for arrival (MA arrives even if no patient)
+            optimal_arrival_step = self._state.step_count + 12
+            self._pending_mutual_aid[new_id] = {
+                "arrival_step": optimal_arrival_step,
+                "patient_id": None,
+                "source_node": MA_SOURCE_NODE,
+            }
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "mutual_aid_called",
+                "ambulance_id": new_id,
+                "patient_id": None,
+                "optimal_arrival_step": optimal_arrival_step,
+            })
+            return
+
+        # Compute actual travel time via road network
+        route = self._road_network.shortest_path(MA_SOURCE_NODE, target_patient.location_node)
+        travel_time = self._road_network.route_travel_time(route) if route else 12
+        optimal_arrival_step = self._state.step_count + travel_time + SCENE_TIME
+
+        self._pending_mutual_aid[new_id] = {
+            "arrival_step": optimal_arrival_step,
+            "patient_id": target_patient.id,
+            "source_node": MA_SOURCE_NODE,
+        }
         self._alerts.append(
-            f"Mutual aid requested: {new_id} available as reserve"
+            f"Mutual aid requested: {new_id} for {target_patient.id} "
+            f"(travel: {travel_time}min + {SCENE_TIME}min scene, ETA step {optimal_arrival_step})"
         )
         self._episode_log.append({
             "step": self._state.step_count,
             "event": "mutual_aid_called",
             "ambulance_id": new_id,
+            "patient_id": target_patient.id,
             "optimal_arrival_step": optimal_arrival_step,
         })
 
@@ -948,3 +1068,21 @@ class CodeRedEnvironment(Environment):
             "general": PatientTier.MEDIUM,
         }
         return mapping.get(condition, PatientTier.MEDIUM)
+
+    def _auto_assign_ma_hospital(self, patient) -> str:
+        """Auto-assign a hospital for a mutual aid patient based on condition."""
+        # Priority: HOSP_A (best), HOSP_B (secondary), HOSP_C (last resort)
+        condition = patient.condition
+        if condition == "cardiac" and self._hospital_system.can_treat("HOSP_A", condition):
+            return "HOSP_A"
+        if condition == "stroke" and self._hospital_system.can_treat("HOSP_A", condition):
+            return "HOSP_A"
+        if condition in ("cardiac", "trauma") and self._hospital_system.can_treat("HOSP_B", condition):
+            return "HOSP_B"
+        if self._hospital_system.can_treat("HOSP_C", condition):
+            return "HOSP_C"
+        # Fallback: first hospital that can treat
+        for hosp_id in ["HOSP_A", "HOSP_B", "HOSP_C"]:
+            if self._hospital_system.can_treat(hosp_id, condition):
+                return hosp_id
+        return "HOSP_A"  # Ultimate fallback

@@ -59,6 +59,8 @@ score = run_baseline_agent(
 
 Or use the `/baseline` endpoint on the deployed Space.
 
+> **Note:** The inference module was renamed from `baseline.py` → `inference.py` per OpenEnv spec.
+
 ## Citation
 
 @misc{coderedenv2026,

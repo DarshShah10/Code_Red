@@ -45,8 +45,10 @@ def test_mutual_aid_on_time_no_penalty():
     # MA arrives exactly at optimal: 0 penalty
     episode_log = [
         {"step": 0, "patient_id": "P0", "event": "patient_created"},
-        {"step": 5, "patient_id": "P0", "event": "mutual_aid_called", "optimal_arrival_step": 17},
-        {"step": 17, "patient_id": "P0", "event": "mutual_aid_arrived", "actual_arrival_step": 17},
+        {"step": 5, "patient_id": "P0", "event": "mutual_aid_called", "ambulance_id": "MUTUAL_1",
+         "patient_id": "P0", "optimal_arrival_step": 17},
+        {"step": 17, "patient_id": "P0", "event": "mutual_aid_arrived",
+         "ambulance_id": "MUTUAL_1", "patient_id": "P0", "actual_arrival_step": 17},
         {"step": 20, "patient_id": "P0", "event": "treatment_complete"},
     ]
     result = grade_episode(episode_log)
@@ -56,8 +58,10 @@ def test_mutual_aid_late_penalty():
     # MA arrives 5 steps late: penalty = 0.2 * 5 / 1 call = 1.0 → capped to 1.0
     episode_log = [
         {"step": 0, "patient_id": "P0", "event": "patient_created"},
-        {"step": 5, "patient_id": "P0", "event": "mutual_aid_called", "optimal_arrival_step": 17},
-        {"step": 22, "patient_id": "P0", "event": "mutual_aid_arrived", "actual_arrival_step": 22},
+        {"step": 5, "patient_id": "P0", "event": "mutual_aid_called", "ambulance_id": "MUTUAL_1",
+         "patient_id": "P0", "optimal_arrival_step": 17},
+        {"step": 22, "patient_id": "P0", "event": "mutual_aid_arrived",
+         "ambulance_id": "MUTUAL_1", "patient_id": "P0", "actual_arrival_step": 22},
         {"step": 30, "patient_id": "P0", "event": "treatment_complete"},
     ]
     result = grade_episode(episode_log)

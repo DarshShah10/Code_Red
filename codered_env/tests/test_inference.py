@@ -19,7 +19,7 @@ def test_run_baseline_agent_runs_episode():
     mock_responses.create = MagicMock(return_value=mock_response)
 
     with patch.object(openai, "responses", mock_responses):
-        from codered_env.baseline import run_baseline_agent
+        from codered_env.inference import run_baseline_agent
         score = run_baseline_agent(task_id="task1", seed=0, api_key="sk-test")
         assert isinstance(score, float)
         assert 0.0 <= score <= 1.0

@@ -92,3 +92,17 @@ def test_hospital_C_cannot_handle_cardiac():
     hs = HospitalSystem()
     result = hs.prepare_or("HOSP_C", "cardiac")
     assert result["success"] is False
+
+
+def test_specialist_available_never_exceeds_total():
+    """Specialist available count should never exceed total (recovery guard)."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    # Force all cardiologists to be paged (available=0)
+    hosp_a.specialists["cardiologist"].available = 0
+    hosp_a.specialists["cardiologist"].status = "paged"
+    hosp_a.specialists["cardiologist"].minutes_until_available = 1
+    # Tick: specialist recovers — available should go to 1, not 2
+    hs.tick()
+    assert hosp_a.specialists["cardiologist"].available == 1
+    assert hosp_a.specialists["cardiologist"].status == "available"
