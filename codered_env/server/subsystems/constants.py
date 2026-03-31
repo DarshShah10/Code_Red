@@ -324,3 +324,11 @@ def get_current_shift(episode_start_hour: int, step_count: int) -> str:
         return "evening"
     else:
         return "night"
+
+
+# =============================================================================
+# FIXED ON-SCENE TIME — Task 16
+# Minutes spent on-scene before transport or return to base.
+# =============================================================================
+
+SCENE_TIME: int = 15  # minutes for assessment, treatment, packaging

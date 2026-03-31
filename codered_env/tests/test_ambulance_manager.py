@@ -52,3 +52,62 @@ def test_get_available_als():
     am = AmbulanceManager(AMBULANCES)
     available = am.get_available(equipment="ALS")
     assert len(available) == 2  # AMB_1 and AMB_2
+
+
+# =============================================================================
+# Scene time tests — Task 16
+# =============================================================================
+
+def test_dispatch_with_patient_adds_scene_time():
+    """Dispatching with patient_id should add SCENE_TIME to ETA."""
+    from codered_env.server.subsystems.constants import AMBULANCES, SCENE_TIME
+    rn = RoadNetwork()
+    am = AmbulanceManager(AMBULANCES)
+    # AMB_1 base = RAILWAY_XING, route to NH45_BYPASS = 6 min (with congestion)
+    route = rn.shortest_path("RAILWAY_XING", "NH45_BYPASS")
+    travel_time = rn.route_travel_time(route)
+    result = am.dispatch("AMB_1", "NH45_BYPASS", road_network=rn, patient_id="P1")
+    assert result["success"] is True
+    amb = am._ambulances["AMB_1"]
+    assert amb.eta_minutes == travel_time + SCENE_TIME
+    assert amb.patient_id == "P1"
+
+
+def test_scene_countdown_then_auto_return():
+    """After arriving on-scene with patient, countdown fires and auto-returns."""
+    from codered_env.server.subsystems.constants import AMBULANCES, SCENE_TIME
+    rn = RoadNetwork()
+    am = AmbulanceManager(AMBULANCES)
+    # Dispatch with patient, forcing arrival
+    am.dispatch("AMB_1", "RAILWAY_XING", road_network=rn, patient_id="P1")
+    amb = am._ambulances["AMB_1"]
+    # Fast-forward to arrival
+    while amb.status == "en_route":
+        am.tick()
+    # Should be on_scene with scene_minutes_remaining
+    assert amb.status == "on_scene"
+    assert amb.scene_minutes_remaining == SCENE_TIME
+    # Tick SCENE_TIME more times → should auto-return
+    for _ in range(SCENE_TIME - 1):
+        am.tick()
+    assert amb.status == "on_scene"
+    am.tick()  # last tick
+    assert amb.status == "returning"
+    assert amb.target_node == amb.base_node
+
+
+def test_mark_available_resets_scene_minutes():
+    """mark_available should reset scene_minutes_remaining."""
+    from codered_env.server.subsystems.constants import AMBULANCES
+    rn = RoadNetwork()
+    am = AmbulanceManager(AMBULANCES)
+    am.dispatch("AMB_1", "NH45_BYPASS", road_network=rn, patient_id="P1")
+    amb = am._ambulances["AMB_1"]
+    # Force arrival
+    while amb.status == "en_route":
+        am.tick()
+    am.tick()  # arrive
+    assert amb.scene_minutes_remaining > 0
+    am.mark_available("AMB_1")
+    assert amb.scene_minutes_remaining == 0
+    assert amb.status == "available"

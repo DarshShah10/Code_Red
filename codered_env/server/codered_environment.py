@@ -35,6 +35,7 @@ from .subsystems.constants import (
     HOSPITAL_MORTALITY_RATES,
     PATIENT_CONDITION_REQUIREMENTS,
     PATIENT_TARGET_TIMES,
+    SCENE_TIME,
     TASK_CONFIG,
 )
 
@@ -213,12 +214,20 @@ class CodeRedEnvironment(Environment):
         # Ambulances
         self._ambulance_manager.tick()
         for amb_id, amb in self._ambulance_manager.all().items():
-            if amb.status == "on_scene" and amb.eta_minutes == 0:
-                # Ambulance arrived, check if it was transporting
+            if amb.arrived_with_patient:
+                # Task 16: scene time expired — deliver patient to hospital
+                amb.arrived_with_patient = False
                 if amb.patient_id:
                     patient = next((pt for pt in self._patients if pt.id == amb.patient_id), None)
                     if patient and patient.status == "transporting":
                         self._do_treatment_arrival(patient, amb_id)
+            elif amb.status == "on_scene" and amb.eta_minutes == 0:
+                # Ambulance arrived at destination
+                if amb.patient_id:
+                    patient = next((pt for pt in self._patients if pt.id == amb.patient_id), None)
+                    if patient and patient.status == "dispatched":
+                        # Ambulance just arrived at patient — start scene time countdown
+                        patient.status = "transporting"
 
         # Mutual aid ambulances: simulate instant pickup + transport to hospital
         for ma_id, ma_info in list(self._active_ma_ambulances.items()):

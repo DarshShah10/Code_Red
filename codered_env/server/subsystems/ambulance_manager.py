@@ -14,6 +14,8 @@ class Ambulance:
     eta_minutes: int = 0
     route: list[str] = field(default_factory=list)
     patient_id: Optional[str] = None
+    scene_minutes_remaining: int = 0  # countdown while on-scene (Task 16)
+    arrived_with_patient: bool = False  # signals environment to call _do_treatment_arrival
 
 
 class AmbulanceManager:
@@ -43,8 +45,12 @@ class AmbulanceManager:
         """
         Dispatch an ambulance to a target node.
         Computes shortest path via road_network.shortest_path().
+        When patient_id is set (ambulance going to pick up a patient),
+        adds SCENE_TIME to the ETA for on-scene assessment/treatment/packaging.
         Returns {"success": bool, "reason": str | None}
         """
+        from .constants import SCENE_TIME
+
         amb = self._ambulances.get(ambulance_id)
         if amb is None:
             return {"success": False, "reason": "ambulance not found"}
@@ -54,6 +60,8 @@ class AmbulanceManager:
         if road_network is not None:
             route = road_network.shortest_path(amb.base_node, target_node)
             eta = road_network.route_travel_time(route)
+            if patient_id is not None:
+                eta += SCENE_TIME  # Task 16: on-scene time before transport
         else:
             route = []
             eta = 0
@@ -91,14 +99,32 @@ class AmbulanceManager:
             amb.route = []
             amb.eta_minutes = 0
             amb.patient_id = None
+            amb.scene_minutes_remaining = 0
+            amb.arrived_with_patient = False
 
     def tick(self) -> None:
-        """Advance all ambulances by 1 minute. Auto-arrive when ETA reaches 0."""
+        """Advance all ambulances by 1 minute. Auto-return when scene time expires."""
+        from .constants import SCENE_TIME
+
         for amb in self._ambulances.values():
-            if amb.status in ("en_route", "returning") and amb.eta_minutes > 0:
+            if amb.status == "on_scene" and amb.scene_minutes_remaining > 0:
+                # Task 16: countdown on-scene time
+                amb.scene_minutes_remaining -= 1
+                if amb.scene_minutes_remaining == 0:
+                    # Scene time expired — signal environment to deliver patient
+                    if amb.patient_id is not None:
+                        amb.arrived_with_patient = True
+                    amb.status = "returning"
+                    amb.route = []
+                    amb.target_node = amb.base_node
+            elif amb.status in ("en_route", "returning") and amb.eta_minutes > 0:
                 amb.eta_minutes -= 1
                 if amb.eta_minutes == 0:
+                    prev_status = amb.status
                     amb.status = "on_scene"
+                    # Task 16: if ambulance arrived with a patient, start scene countdown
+                    if amb.patient_id is not None and prev_status == "en_route":
+                        amb.scene_minutes_remaining = SCENE_TIME
 
     def get_available(self, equipment: Optional[str] = None) -> list[str]:
         ids = [
