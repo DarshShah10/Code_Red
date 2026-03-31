@@ -115,3 +115,138 @@ def test_timestep_increments_patient_time():
     assert env._state.step_count == 1
     env.step(MaintainPlan())
     assert env._state.step_count == 2
+
+
+def test_hospital_mortality_roll_hosp_c_emergent_always_dies():
+    """
+    HOSP_C cardiac mortality = 1.0 → patient always dies even after 'treatment'.
+    HOSP_C has 0 ORs, so surgery can't start there. We test the mortality roll
+    logic directly by patching self._rng to return 0.5 (below threshold=1.0).
+    """
+    from codered_env.server.codered_environment import CodeRedEnvironment
+    from codered_env.server.models.actions import MaintainPlan
+
+    env = CodeRedEnvironment()
+    env.reset(seed=42, task_id="task1")
+
+    patient = env._patient_manager.patients[0]
+    assert patient.condition == "cardiac"
+
+    # Use HOSP_A (has ORs and cardiologists) but set assigned_hospital to HOSP_C
+    # for the mortality rate lookup. Override the RNG to force death (random() < 1.0).
+    patient.assigned_hospital = "HOSP_C"
+    patient.status = "in_treatment"
+
+    hosp_a = env._hospital_system.get("HOSP_A")
+    idle_or = next((o for o in hosp_a.operating_rooms if o.status == "idle"), None)
+    assert idle_or is not None, "HOSP_A should have an idle OR"
+
+    env._hospital_system.start_surgery(
+        "HOSP_A", idle_or.index, "cardiac", patient.id, duration_minutes=30
+    )
+    env._active_surgeries[patient.id] = {
+        "hospital_id": "HOSP_A",
+        "or_index": idle_or.index,
+        "start_step": env._state.step_count,
+        "duration_minutes": 30,
+    }
+
+    # Override RNG so mortality roll always returns death (random() < 1.0 always)
+    import random
+    original_choice = env._rng.random
+    env._rng.random = lambda: 0.5  # 0.5 < 1.0 → patient dies
+
+    try:
+        for _ in range(35):
+            env.step(MaintainPlan())
+
+        assert patient.outcome == "deceased", (
+            f"Expected patient to die (mortality=1.0 for HOSP_C/cardiac), got outcome={patient.outcome}"
+        )
+    finally:
+        env._rng.random = original_choice
+
+
+def test_hospital_mortality_roll_survives_with_low_rate():
+    """
+    With HOSP_A cardiac (8% mortality) and rng forced above threshold, patient survives.
+    """
+    from codered_env.server.codered_environment import CodeRedEnvironment
+    from codered_env.server.models.actions import MaintainPlan
+
+    env = CodeRedEnvironment()
+    env.reset(seed=42, task_id="task1")
+
+    patient = env._patient_manager.patients[0]
+    patient.assigned_hospital = "HOSP_A"
+    patient.status = "in_treatment"
+
+    hosp = env._hospital_system.get("HOSP_A")
+    idle_or = next((o for o in hosp.operating_rooms if o.status == "idle"), None)
+    assert idle_or is not None
+
+    env._hospital_system.start_surgery(
+        "HOSP_A", idle_or.index, "cardiac", patient.id, duration_minutes=30
+    )
+    env._active_surgeries[patient.id] = {
+        "hospital_id": "HOSP_A",
+        "or_index": idle_or.index,
+        "start_step": env._state.step_count,
+        "duration_minutes": 30,
+    }
+
+    # Override RNG so mortality roll always returns survival (random() >= 0.08)
+    saved_random = env._rng.random
+    env._rng.random = lambda: 0.5  # 0.5 >= 0.08 → patient survives
+
+    try:
+        for _ in range(35):
+            env.step(MaintainPlan())
+
+        assert patient.outcome == "saved", (
+            f"Expected patient to survive (random=0.5 >= mortality=0.08), got outcome={patient.outcome}"
+        )
+    finally:
+        env._rng.random = saved_random
+
+
+def test_hospital_mortality_roll_seed_reproducibility():
+    """
+    Mortality roll is seeded — same seed → same survival outcome.
+    """
+    from codered_env.server.codered_environment import CodeRedEnvironment
+    from codered_env.server.models.actions import MaintainPlan
+
+    outcomes_seed42 = []
+    outcomes_seed99 = []
+
+    for seed in [42, 99]:
+        for repeat in range(3):
+            env = CodeRedEnvironment()
+            env.reset(seed=seed, task_id="task1")
+            patient = env._patient_manager.patients[0]
+            patient.assigned_hospital = "HOSP_A"
+            patient.status = "in_treatment"
+
+            hosp = env._hospital_system.get("HOSP_A")
+            idle_or = next((o for o in hosp.operating_rooms if o.status == "idle"), None)
+            if idle_or:
+                env._hospital_system.start_surgery("HOSP_A", idle_or.index, "cardiac", patient.id, duration_minutes=30)
+                env._active_surgeries[patient.id] = {
+                    "hospital_id": "HOSP_A",
+                    "or_index": idle_or.index,
+                    "start_step": env._state.step_count,
+                    "duration_minutes": 30,
+                }
+
+            for _ in range(35):
+                env.step(MaintainPlan())
+
+            if seed == 42:
+                outcomes_seed42.append(patient.outcome)
+            else:
+                outcomes_seed99.append(patient.outcome)
+
+    # Same seed always produces the same outcome
+    assert len(set(outcomes_seed42)) == 1, "HOSP_A mortality should be deterministic per seed"
+
