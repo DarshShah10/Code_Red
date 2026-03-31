@@ -46,6 +46,7 @@ class Patient(BaseModel):
     treatment_complete_time: Optional[int] = None
     outcome: Optional[Literal["saved", "deceased"]] = None
     is_secondary: bool = False
+    icu_status: Optional[str] = None  # "admitted" | "boarding" | None
 
     model_config = {"extra": "forbid"}
 

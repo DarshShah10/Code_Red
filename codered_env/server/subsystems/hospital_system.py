@@ -216,6 +216,31 @@ class HospitalSystem:
         return spec.status == "available" and spec.available > 0
 
     # =========================================================================
+    # ICU Bed Management (Task 13)
+    # =========================================================================
+
+    def consume_icu_bed(self, hosp_id: str) -> bool:
+        """
+        Try to consume an ICU bed for an incoming patient.
+        Returns True if bed was consumed, False if ICU is full.
+        """
+        h = self._hospitals.get(hosp_id)
+        if h is None:
+            return False
+        if h.icu_beds["available"] <= 0:
+            return False
+        h.icu_beds["available"] -= 1
+        return True
+
+    def release_icu_bed(self, hosp_id: str) -> None:
+        """Release an ICU bed when a patient is discharged or deceased."""
+        h = self._hospitals.get(hosp_id)
+        if h is None:
+            return
+        if h.icu_beds["available"] < h.icu_beds["total"]:
+            h.icu_beds["available"] += 1
+
+    # =========================================================================
     # Time Advance
     # =========================================================================
 

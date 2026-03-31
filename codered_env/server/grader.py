@@ -248,6 +248,16 @@ def grade_from_environment(env) -> RubricResult:
     # Expose in breakdown
     cross_validation_penalty = min(1.0, 0.2 * num_mismatches)
 
+    # =========================================================================
+    # ICU BOARDING PENALTY (Task 13)
+    # =========================================================================
+    boarding_events = [
+        e for e in log
+        if e.get("event") == "icu_boarding"
+    ]
+    num_boarding = len(boarding_events)
+    icu_boarding_penalty = min(1.0, 0.05 * num_boarding)
+
     # Grade from the log first
     result = grade_episode(log)
 
@@ -257,5 +267,10 @@ def grade_from_environment(env) -> RubricResult:
     result.breakdown["cross_validation_penalty"] = round(cross_validation_penalty, 4)
     result.breakdown["treated_missing_log"] = sorted(treated_missing_log)
     result.breakdown["treated_but_deceased"] = sorted(treated_but_deceased)
+
+    # Apply ICU boarding penalty
+    result.final_score = max(0.0, result.final_score - icu_boarding_penalty)
+    result.breakdown["icu_boarding_events"] = num_boarding
+    result.breakdown["icu_boarding_penalty"] = round(icu_boarding_penalty, 4)
 
     return result

@@ -106,3 +106,44 @@ def test_specialist_available_never_exceeds_total():
     hs.tick()
     assert hosp_a.specialists["cardiologist"].available == 1
     assert hosp_a.specialists["cardiologist"].status == "available"
+
+
+def test_consume_icu_bed_success():
+    """consume_icu_bed returns True and decrements count when beds available."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    initial = hosp_a.icu_beds["available"]
+    result = hs.consume_icu_bed("HOSP_A")
+    assert result is True
+    assert hosp_a.icu_beds["available"] == initial - 1
+
+
+def test_consume_icu_bed_fails_when_full():
+    """consume_icu_bed returns False when no beds available."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    # Exhaust all beds
+    while hosp_a.icu_beds["available"] > 0:
+        hs.consume_icu_bed("HOSP_A")
+    result = hs.consume_icu_bed("HOSP_A")
+    assert result is False
+
+
+def test_release_icu_bed_returns_bed():
+    """release_icu_bed increments available count."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    initial = hosp_a.icu_beds["available"]
+    hs.consume_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] == initial - 1
+    hs.release_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] == initial
+
+
+def test_release_icu_bed_caps_at_total():
+    """release_icu_bed does not exceed total."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    total = hosp_a.icu_beds["total"]
+    hs.release_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] <= total

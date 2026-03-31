@@ -319,6 +319,9 @@ class CodeRedEnvironment(Environment):
                         else:
                             self._patient_manager.mark_deceased(patient_id, reason="hospital_mortality")
 
+                        # Release ICU bed on treatment completion (Task 13)
+                        self._hospital_system.release_icu_bed(hosp_id)
+
                         self._episode_log.append({
                             "step": self._state.step_count,
                             "patient_id": patient_id,
@@ -326,6 +329,7 @@ class CodeRedEnvironment(Environment):
                             "effective_time": effective_time,
                             "target_time": target_time,
                             "vitals_at_treatment": patient.vitals_score,
+                            "icu_status": patient.icu_status,
                         })
                         del self._active_surgeries[patient_id]
 
@@ -481,6 +485,19 @@ class CodeRedEnvironment(Environment):
                     "or_ready": idle_or is not None,
                     "specialist_available": specialist_available,
                 })
+
+                # ICU bed constraint (Task 13): consume bed on arrival
+                icu_available = self._hospital_system.consume_icu_bed(patient.assigned_hospital)
+                if icu_available:
+                    patient.icu_status = "admitted"
+                else:
+                    patient.icu_status = "boarding"
+                    self._episode_log.append({
+                        "step": self._state.step_count,
+                        "patient_id": patient.id,
+                        "event": "icu_boarding",
+                        "hospital_id": patient.assigned_hospital,
+                    })
 
                 # Start surgery/treatment if OR available
                 if idle_or:
@@ -966,6 +983,7 @@ class CodeRedEnvironment(Environment):
                 treatment_complete_time=p.treatment_complete_time,
                 outcome=p.outcome,
                 is_secondary=False,
+                icu_status=p.icu_status,
             )
             for p in self._patients
         ]

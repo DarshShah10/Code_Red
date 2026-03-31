@@ -19,6 +19,7 @@ class Patient:
     arrival_hospital_step: Optional[int] = None
     vitals_score: float = 1.0
     _vitals_frozen: bool = False
+    icu_status: Optional[str] = None  # "admitted" | "boarding" | None
 
 
 TERMINAL_STATUSES = frozenset({"treated", "deceased"})

@@ -250,3 +250,72 @@ def test_hospital_mortality_roll_seed_reproducibility():
     # Same seed always produces the same outcome
     assert len(set(outcomes_seed42)) == 1, "HOSP_A mortality should be deterministic per seed"
 
+
+def test_icu_bed_consumed_on_arrival():
+    """
+    consume_icu_bed decrements count and returns True when beds available.
+    """
+    from codered_env.server.subsystems.hospital_system import HospitalSystem
+
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    initial = hosp_a.icu_beds["available"]
+    assert initial > 0
+
+    result = hs.consume_icu_bed("HOSP_A")
+    assert result is True
+    assert hosp_a.icu_beds["available"] == initial - 1
+
+    # Release restores the bed
+    hs.release_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] == initial
+
+
+def test_icu_boarding_when_beds_exhausted():
+    """
+    When all ICU beds are consumed, consume_icu_bed returns False.
+    Patient should get icu_status='boarding' in the environment.
+    """
+    from codered_env.server.subsystems.hospital_system import HospitalSystem
+
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+
+    # Exhaust all beds
+    while hs.consume_icu_bed("HOSP_A"):
+        pass
+    assert hosp_a.icu_beds["available"] == 0
+
+    result = hs.consume_icu_bed("HOSP_A")
+    assert result is False
+
+
+def test_grader_icu_boarding_penalty():
+    """
+    grade_from_environment applies ICU boarding penalty.
+    """
+    from codered_env.server.grader import grade_from_environment
+
+    class MockPM:
+        patients = []
+
+    class MockEnv:
+        _episode_log = []
+        _patient_manager = MockPM()
+
+        def get_episode_log(self):
+            return self._episode_log
+
+    env = MockEnv()
+    env._episode_log = [
+        {"step": 0, "patient_id": "P1", "event": "patient_created", "condition": "cardiac"},
+        {"step": 10, "patient_id": "P1", "event": "icu_boarding", "hospital_id": "HOSP_A"},
+        {"step": 30, "patient_id": "P1", "event": "treatment_complete",
+         "effective_time": 30, "target_time": 90, "vitals_at_treatment": 0.9},
+    ]
+    env._patient_manager.patients = []
+
+    result = grade_from_environment(env)
+    assert result.breakdown["icu_boarding_events"] == 1
+    assert result.breakdown["icu_boarding_penalty"] == 0.05
+
