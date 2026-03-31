@@ -181,7 +181,7 @@ TASK_CONFIG: Dict[str, Dict] = {
 # =============================================================================
 
 VITALS_INITIAL = 1.0
-VITALS_STABLE_DECAY_RATE = 0.002   # per step in stable window (1 step = 1 min)
+VITALS_STABLE_DECAY_RATE = 0.0     # flat in stable window — no recovery without treatment
 VITALS_DETERIORATING_THRESHOLD = 0.75
 VITALS_CRITICAL_THRESHOLD = 0.4
 VITALS_DEAD_THRESHOLD = 0.0
@@ -189,9 +189,9 @@ VITALS_DEAD_THRESHOLD = 0.0
 # Reward shaping
 VITALS_DELTA_WEIGHT = 0.5
 MILESTONE_REWARDS = {
-    "dispatched": 0.05,
-    "in_treatment": 0.10,
-    "treated": 0.20,
-    "deceased": -0.30,
+    "dispatched": 0.20,
+    "in_treatment": 0.40,
+    "treated": 0.80,
+    "deceased": -0.80,
 }
 REWARD_STEP_CLAMP = (-1.0, 1.0)

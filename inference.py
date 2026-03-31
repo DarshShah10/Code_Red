@@ -1,4 +1,4 @@
-"""OpenAI-powered baseline agent for CodeRedEnv."""
+"""OpenAI-powered inference agent for CodeRedEnv (OpenEnv spec: inference.py)."""
 import os
 from typing import Literal, List
 import openai

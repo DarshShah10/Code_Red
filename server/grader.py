@@ -170,7 +170,13 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
     # =========================================================================
     # FINAL SCORE
     # =========================================================================
-    raw = 0.40 * time_score + 0.20 * efficiency + 0.20 * secondary_harm + 0.20 * prep_ready
+    raw = (
+        0.36 * time_score
+        + 0.18 * efficiency
+        + 0.18 * secondary_harm
+        + 0.18 * prep_ready
+        + 0.10 * vitals_score_avg
+    )
     final_score = max(0.0, min(1.0, raw - mutual_aid_penalty))
 
     breakdown = {
@@ -178,6 +184,7 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         "efficiency": efficiency,
         "secondary_harm": secondary_harm,
         "prep_ready": prep_ready,
+        "vitals_score_avg": vitals_score_avg,
         "mutual_aid_penalty": mutual_aid_penalty,
         "unused_specialist_pages": unused_specialist,
         "wasted_or_preps": wasted_or_preps,

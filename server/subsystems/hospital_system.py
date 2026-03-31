@@ -249,7 +249,8 @@ class HospitalSystem:
                 if spec.status in ("paged", "en_route") and spec.minutes_until_available > 0:
                     if spec.minutes_until_available <= 1:
                         spec.status = "available"
-                        spec.available += 1
+                        if spec.available < spec.total:
+                            spec.available += 1
                         spec.minutes_until_available = 0
                     else:
                         spec.minutes_until_available -= 1

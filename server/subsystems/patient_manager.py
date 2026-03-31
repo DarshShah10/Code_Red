@@ -48,19 +48,34 @@ class PatientManager:
         for p in self.patients:
             self._onset_steps[p.id] = p.onset_step
 
+    # Nodes where patients can spawn (incident scenes — not hospital nodes)
+    _SPAWN_NODES = [
+        "RAJIV_CHOWK", "LAJPAT_NAGAR", "CHOWKHA", "RAILWAY_XING",
+        "NH45_BYPASS", "IT_HUB", "MG_CHOWK", "SECTOR_12", "RING_ROAD",
+    ]
+
     def _spawn_patients(self) -> None:
-        """Spawn patients based on task configuration."""
+        """Spawn patients based on task configuration with randomized locations and onset steps."""
         from .constants import TASK_CONFIG  # string keys: "task1", "task2", "task3"
 
         config = TASK_CONFIG.get(self._task_id, TASK_CONFIG["task1"])
         for pdef in config["patients"]:
             self._patient_counter += 1
+            # Randomize patient spawn location (incident scenes only, not hospital nodes)
+            location = self._rng.choice(self._SPAWN_NODES)
+            # Jitter onset_step for multi-patient tasks (task2/task3); task1 stays deterministic
+            base_onset = pdef.get("onset_step", 0)
+            if self._task_id in ("task2", "task3"):
+                onset_jitter = self._rng.randint(-3, 3)
+                onset = max(0, base_onset + onset_jitter)
+            else:
+                onset = base_onset
             patient = Patient(
                 id=f"P{self._patient_counter}",
                 condition=pdef["condition"],
                 status="waiting",
-                location_node=pdef.get("location_node", "NH45_BYPASS"),
-                onset_step=pdef.get("onset_step", 0),
+                location_node=location,
+                onset_step=onset,
             )
             self.patients.append(patient)
 
@@ -123,3 +138,21 @@ class PatientManager:
     @property
     def patients_dict(self) -> dict[str, Patient]:
         return {p.id: p for p in self.patients}
+
+    def spawn_secondary(self, condition: str, onset_step: int) -> Patient:
+        """
+        Spawn a secondary (surge) patient at a random incident scene node.
+        Secondary patients are counted in the secondary_harm grader axis.
+        """
+        location = self._rng.choice(self._SPAWN_NODES)
+        self._patient_counter += 1
+        patient = Patient(
+            id=f"P{self._patient_counter}",
+            condition=condition,
+            status="waiting",
+            location_node=location,
+            onset_step=onset_step,
+        )
+        self.patients.append(patient)
+        self._onset_steps[patient.id] = onset_step
+        return patient

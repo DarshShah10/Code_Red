@@ -126,17 +126,17 @@ class BaselineRequest(BaseModel):
 async def run_baseline(req: BaselineRequest) -> dict:
     """Run OpenAI baseline agent on seeds [0, 1, 2] and return scores."""
     try:
-        from codered_env import baseline as baseline_module
+        from codered_env import inference as inference_module
     except ImportError:
         raise HTTPException(
             status_code=501,
-            detail="Baseline agent not implemented yet. Run manually with baseline.py"
+            detail="Inference agent not implemented yet. Run manually with inference.py"
         )
 
     scores = []
     for seed in [0, 1, 2]:
         try:
-            score = baseline_module.run_baseline_agent(
+            score = inference_module.run_baseline_agent(
                 task_id=req.task_id, seed=seed,
                 api_key=req.openai_api_key, model=req.model
             )

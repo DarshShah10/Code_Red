@@ -56,6 +56,41 @@ def test_mutual_aid_not_available_task1():
     assert any("no calls remaining" in a for a in obs2.alerts)
 
 
+def test_mutual_aid_assigns_patient_and_logs_arrival():
+    """MA ambulance arrival should auto-assign highest-priority patient and log patient_id."""
+    from codered_env.server.codered_environment import CodeRedEnvironment
+    from codered_env.server.models.actions import RequestMutualAid, MaintainPlan
+    env = CodeRedEnvironment()
+    env.reset(seed=0, task_id="task2")  # task2 has 1 MA call
+    obs = env.reset(seed=0, task_id="task2")
+    assert obs.mutual_aid_remaining == 1
+
+    # Call mutual aid
+    obs = env.step(RequestMutualAid())
+    assert obs.mutual_aid_remaining == 0
+
+    # Episode log should have mutual_aid_called with patient_id
+    log = env.get_episode_log()
+    ma_called = next(e for e in log if e["event"] == "mutual_aid_called")
+    assert "patient_id" in ma_called
+    assert ma_called["patient_id"] is not None  # Patient assigned at call time
+    assert "optimal_arrival_step" in ma_called
+    assert ma_called["optimal_arrival_step"] > env._state.step_count
+
+    # Fast-forward to MA arrival (compute how many steps needed)
+    arrival_step = ma_called["optimal_arrival_step"]
+    for _ in range(arrival_step - env._state.step_count):
+        obs = env.step(MaintainPlan())
+
+    # After arrival: episode log should have mutual_aid_arrived with patient_id
+    log = env.get_episode_log()
+    ma_arrived = next(e for e in log if e["event"] == "mutual_aid_arrived")
+    assert "patient_id" in ma_arrived
+    assert ma_arrived["patient_id"] == ma_called["patient_id"]
+    assert "actual_arrival_step" in ma_arrived
+    assert ma_arrived["actual_arrival_step"] == arrival_step
+
+
 def test_blood_emergency_release():
     from codered_env.server.codered_environment import CodeRedEnvironment
     from codered_env.server.models.actions import AllocateBlood
