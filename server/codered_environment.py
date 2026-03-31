@@ -31,6 +31,7 @@ from .subsystems.constants import (
     BLOOD_TYPES,
     CITY_NODES,
     HOSPITALS,
+    HOSPITAL_MORTALITY_RATES,
     PATIENT_CONDITION_REQUIREMENTS,
     PATIENT_TARGET_TIMES,
     TASK_CONFIG,
@@ -301,12 +302,23 @@ class CodeRedEnvironment(Environment):
                     None,
                 )
                 if or_obj and or_obj.status == "idle" and or_obj.patient_id is None:
-                    # Surgery just completed
+                    # Surgery just completed — roll mortality based on hospital quality
                     patient = self._patient_manager.get(patient_id)
                     if patient and patient.status == "in_treatment":
                         effective_time = self._state.step_count - surgery_info["start_step"]
                         target_time = PATIENT_TARGET_TIMES.get(patient.condition, 60)
-                        self._patient_manager.mark_treated(patient_id, effective_time)
+
+                        # Hospital quality variance (Task 12): roll mortality
+                        hosp_id = patient.assigned_hospital
+                        mort_rates = HOSPITAL_MORTALITY_RATES.get(hosp_id, {})
+                        mort_rate = mort_rates.get(patient.condition, 0.0)
+                        survived = self._rng.random() >= mort_rate
+
+                        if survived:
+                            self._patient_manager.mark_treated(patient_id, effective_time)
+                        else:
+                            self._patient_manager.mark_deceased(patient_id, reason="hospital_mortality")
+
                         self._episode_log.append({
                             "step": self._state.step_count,
                             "patient_id": patient_id,

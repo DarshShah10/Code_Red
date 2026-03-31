@@ -177,6 +177,37 @@ TASK_CONFIG: Dict[str, Dict] = {
 }
 
 # =============================================================================
+# HOSPITAL QUALITY VARIANCE — Task 12
+# =============================================================================
+
+# Mortality rate per hospital × condition (probability patient dies even after treatment).
+# HOSP_A = tertiary referral (AIIMS) — best outcomes
+# HOSP_B = district hospital — moderate outcomes
+# HOSP_C = community HC — stabilisation only; no OR, no surgery → 100% mortality for
+#          conditions requiring procedures (cardiac, stroke, trauma)
+HOSPITAL_MORTALITY_RATES: dict[str, dict[str, float]] = {
+    "HOSP_A": {
+        "cardiac": 0.08,
+        "stroke": 0.12,
+        "trauma": 0.15,
+        "general": 0.05,
+    },
+    "HOSP_B": {
+        "cardiac": 0.15,
+        "stroke": 0.25,   # no neurologist → worse stroke outcomes
+        "trauma": 0.20,
+        "general": 0.08,
+    },
+    "HOSP_C": {
+        # Community HC has no OR and no specialists — cannot treat emergent conditions
+        "cardiac": 1.00,
+        "stroke": 1.00,
+        "trauma": 1.00,
+        "general": 0.10,
+    },
+}
+
+# =============================================================================
 # PATIENT VITALS — Phase 1
 # =============================================================================
 
