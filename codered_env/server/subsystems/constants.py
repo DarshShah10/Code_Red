@@ -1,5 +1,6 @@
 """Static data for CodeRedEnv — Prakashnagar city layout, hospital definitions, ambulance fleet."""
 
+from enum import Enum
 from typing import Dict, List
 
 # =============================================================================
@@ -174,6 +175,21 @@ TASK_CONFIG: Dict[str, Dict] = {
         "mutual_aid_calls": 2,
         "max_steps": 60,
     },
+    "task4": {
+        "patients": [],
+        "disruption_prob": 0.05,
+        "mutual_aid_calls": 1,
+        "max_steps": 45,
+        "use_call_queue": True,   # Phase 2: patients arrive as dispatch calls
+    },
+    "task5": {
+        "patients": [],
+        "disruption_prob": 0.15,
+        "mutual_aid_calls": 2,
+        "max_steps": 60,
+        "use_call_queue": True,   # Phase 2: patients arrive as dispatch calls
+        "cascade_enabled": True,   # Phase 2: cascade engine active
+    },
 }
 
 # =============================================================================
@@ -332,3 +348,52 @@ def get_current_shift(episode_start_hour: int, step_count: int) -> str:
 # =============================================================================
 
 SCENE_TIME: int = 15  # minutes for assessment, treatment, packaging
+
+
+# =============================================================================
+# PRE-DISPATCH UNCERTAINTY — Phase 2 Task 1
+# Dispatch category → true condition probability table
+# Each category maps to a list of (condition, probability) pairs.
+# =============================================================================
+
+class DispatchCategory(str, Enum):
+    CHEST_PAIN = "chest_pain"
+    ALTERED_CONSCIOUSNESS = "altered_consciousness"
+    FALL = "fall"
+    BREATHING_DIFFICULTY = "breathing_difficulty"
+    GENERAL = "general"
+
+
+DISPATCH_CATEGORY_MAP: dict[DispatchCategory, list[tuple[str, float]]] = {
+    DispatchCategory.CHEST_PAIN: [
+        ("cardiac", 0.45), ("anxiety", 0.25), ("gerd", 0.20), ("panic", 0.10)
+    ],
+    DispatchCategory.ALTERED_CONSCIOUSNESS: [
+        ("hypoglycemia", 0.35), ("stroke", 0.30), ("intoxication", 0.25), ("seizure", 0.10)
+    ],
+    DispatchCategory.FALL: [
+        ("fracture", 0.35), ("trauma", 0.30), ("syncope", 0.25), ("minor", 0.10)
+    ],
+    DispatchCategory.BREATHING_DIFFICULTY: [
+        ("respiratory", 0.40), ("cardiac", 0.25), ("asthma", 0.25), ("panic", 0.10)
+    ],
+    DispatchCategory.GENERAL: [
+        ("general", 0.60), ("dehydration", 0.25), ("viral", 0.15)
+    ],
+}
+
+
+ALS_NEEDED_PROB: dict[DispatchCategory, float] = {
+    DispatchCategory.CHEST_PAIN: 0.60,
+    DispatchCategory.ALTERED_CONSCIOUSNESS: 0.50,
+    DispatchCategory.FALL: 0.30,
+    DispatchCategory.BREATHING_DIFFICULTY: 0.45,
+    DispatchCategory.GENERAL: 0.10,
+}
+
+
+# Call spawn configuration
+CALL_SPAWN_INTERVAL: int = 8       # steps between new call spawns
+MAX_PENDING_CALLS: int = 5         # max calls in queue before oldest dropped
+FORCE_SPAWN_THRESHOLD: int = 20    # steps waiting → force patient spawn
+CALL_SEVERITY_ESCALATION: float = 0.05  # +5% severity per step waiting
