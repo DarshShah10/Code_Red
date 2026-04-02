@@ -13,6 +13,31 @@ class DispatchAmbulance(Action):
     target_node: str = Field(..., description="Target node ID")
 
 
+class DispatchALS(Action):
+    """Dispatch an ALS ambulance to a pending dispatch call. Commits ALS resource."""
+    ambulance_id: str = Field(..., description="ALS ambulance ID to dispatch")
+    call_id: str = Field(..., description="Dispatch call ID to respond to")
+
+
+class DispatchBLS(Action):
+    """Dispatch a BLS ambulance to a pending dispatch call."""
+    ambulance_id: str = Field(..., description="BLS ambulance ID to dispatch")
+    call_id: str = Field(..., description="Dispatch call ID to respond to")
+
+
+class TriageCall(Action):
+    """Decide what to do with a pending dispatch call."""
+    call_id: str = Field(..., description="Dispatch call ID to triage")
+    decision: Literal["dispatch_als", "dispatch_bls", "self_transport", "callback", "no_dispatch"] = Field(
+        ...,
+        description="Triage decision"
+    )
+    ambulance_id: Optional[str] = Field(
+        default=None,
+        description="Ambulance ID (required when decision is dispatch_als or dispatch_bls)"
+    )
+
+
 class PrepareOR(Action):
     """Begin OR preparation for a procedure type."""
     hospital_id: str = Field(..., description="Hospital ID")
@@ -84,7 +109,10 @@ class MaintainPlan(Action):
 
 # Union of all action types
 CodeRedAction = (
-    DispatchAmbulance
+    DispatchAmbulance    # kept for backward compat with tasks 1-3
+    | DispatchALS
+    | DispatchBLS
+    | TriageCall
     | PrepareOR
     | PageSpecialist
     | AssignHospital
