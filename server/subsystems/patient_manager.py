@@ -20,6 +20,11 @@ class Patient:
     vitals_score: float = 1.0
     _vitals_frozen: bool = False
     icu_status: Optional[str] = None  # "admitted" | "boarding" | None
+    # Phase 2 fields:
+    dispatch_call_id: Optional[str] = None
+    is_secondary: bool = False
+    cascade_trigger_reason: Optional[str] = None
+    observed_condition: Optional[str] = None
 
 
 TERMINAL_STATUSES = frozenset({"treated", "deceased"})
@@ -103,7 +108,7 @@ class PatientManager:
             p.vitals_score = 0.0
             p._vitals_frozen = True
 
-    def tick(self, onset_steps: dict[str, int], step_count: int) -> None:
+    def tick(self, onset_steps: dict[str, int], step_count: int, overcrowding_modifier: float = 1.0) -> None:
         """Advance patient vitals deterioration. Call once per environment step."""
         from .constants import (
             VITALS_STABLE_DECAY_RATE, VITALS_DETERIORATING_THRESHOLD,
@@ -122,7 +127,8 @@ class PatientManager:
                 patient.vitals_score = min(1.0, patient.vitals_score + VITALS_STABLE_DECAY_RATE)
             else:
                 # Post-target: linear fall from 1.0 to 0.0 over one target_time window
-                overtime_ratio = (effective_time - target_time) / target_time
+                # Overcrowding_modifier speeds up deterioration (multiplies effective overtime)
+                overtime_ratio = ((effective_time - target_time) * overcrowding_modifier) / target_time
                 patient.vitals_score = max(0.0, 1.0 - overtime_ratio)
 
             # Status escalation
@@ -140,12 +146,19 @@ class PatientManager:
     def patients_dict(self) -> dict[str, Patient]:
         return {p.id: p for p in self.patients}
 
-    def spawn_secondary(self, condition: str, onset_step: int) -> Patient:
+    def spawn_secondary(
+        self,
+        condition: str,
+        onset_step: int,
+        triggered_by: Optional[str] = None,
+        reason: Optional[str] = None,
+        spawn_node: Optional[str] = None,
+    ) -> Patient:
         """
         Spawn a secondary (surge) patient at a random incident scene node.
         Secondary patients are counted in the secondary_harm grader axis.
         """
-        location = self._rng.choice(self._SPAWN_NODES)
+        location = spawn_node or self._rng.choice(self._SPAWN_NODES)
         self._patient_counter += 1
         patient = Patient(
             id=f"P{self._patient_counter}",
@@ -153,6 +166,9 @@ class PatientManager:
             status="waiting",
             location_node=location,
             onset_step=onset_step,
+            is_secondary=True,
+            cascade_trigger_reason=reason,
+            observed_condition=condition,
         )
         self.patients.append(patient)
         self._onset_steps[patient.id] = onset_step
