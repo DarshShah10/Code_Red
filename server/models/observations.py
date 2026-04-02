@@ -9,6 +9,8 @@ from openenv.core.env_server.types import Observation
 from .entities import (
     AmbulanceState,
     BloodBankState,
+    DispatchCall,
+    DispatchOutcome,
     HospitalState,
     Patient,
     RoadNetworkState,
@@ -46,6 +48,20 @@ class CodeRedObservation(Observation):
         ge=0.0,
         le=1.0,
         description="Average vitals of all active (non-terminal) patients"
+    )
+    pending_calls: List[DispatchCall] = Field(
+        default_factory=list,
+        description="Dispatch calls awaiting triage decisions (Phase 2)"
+    )
+    recent_dispatch_outcomes: List[DispatchOutcome] = Field(
+        default_factory=list,
+        description="Last 5 resolved dispatch outcomes with ground truth (Phase 2)"
+    )
+    overcrowding_modifier: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=1.5,
+        description="Deterioration rate multiplier when ED is overcrowded (1.0 or 1.2)"
     )
 
     model_config = {"extra": "forbid"}
