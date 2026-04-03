@@ -520,7 +520,7 @@ class CodeRedEnvironment(Environment):
                 specialist_map = {
                     "cardiac": "cardiologist",
                     "stroke": "neurologist",
-                    "trauma": "surgeon",
+                    "trauma": "trauma_surgeon",
                     "general": "general_surgeon",
                 }
                 specialist_type = specialist_map.get(patient.condition, "general_surgeon")
@@ -538,18 +538,19 @@ class CodeRedEnvironment(Environment):
                     "specialist_available": specialist_available,
                 })
 
-                # ICU bed constraint (Task 13): consume bed on arrival
-                icu_available = self._hospital_system.consume_icu_bed(patient.assigned_hospital)
-                if icu_available:
-                    patient.icu_status = "admitted"
-                else:
-                    patient.icu_status = "boarding"
-                    self._episode_log.append({
-                        "step": self._state.step_count,
-                        "patient_id": patient.id,
-                        "event": "icu_boarding",
-                        "hospital_id": patient.assigned_hospital,
-                    })
+                # ICU bed constraint (Task 13): consume bed only if hospital can treat this condition
+                if self._hospital_system.can_treat(patient.assigned_hospital, patient.condition):
+                    icu_available = self._hospital_system.consume_icu_bed(patient.assigned_hospital)
+                    if icu_available:
+                        patient.icu_status = "admitted"
+                    else:
+                        patient.icu_status = "boarding"
+                        self._episode_log.append({
+                            "step": self._state.step_count,
+                            "patient_id": patient.id,
+                            "event": "icu_boarding",
+                            "hospital_id": patient.assigned_hospital,
+                        })
 
                 # Start surgery/treatment if OR available
                 if idle_or:
@@ -1150,7 +1151,7 @@ class CodeRedEnvironment(Environment):
                 tier=self._condition_to_tier(p.condition),
                 location_node=p.location_node,
                 time_since_onset=self._state.step_count - p.onset_step,
-                assigned_ambulance=p.assigned_hospital,  # Will be set by ambulance manager
+                assigned_ambulance=None,  # ambulance assignment tracked by ambulance_manager, not here
                 assigned_hospital=p.assigned_hospital,
                 status=_map_patient_status(p.status),
                 vitals_score=p.vitals_score,
