@@ -15,7 +15,7 @@ FUNCTIONS = [
     {
         "type": "function",
         "name": "dispatch_ambulance",
-        "description": "Dispatch an ambulance to pick up a patient. Must also assign hospital with assign_hospital.",
+        "description": "Dispatch an ambulance to a scene node (Phase 1 compat). Must also assign hospital with assign_hospital.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -24,6 +24,49 @@ FUNCTIONS = [
                 "target_node": {"type": "string"},
             },
             "required": ["ambulance_id", "patient_id", "target_node"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "dispatch_als",
+        "description": "Dispatch an ALS ambulance to a pending 911 call (Phase 2). Use triage_call first to decide if ALS is needed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ambulance_id": {"type": "string", "enum": ["AMB_1", "AMB_2"]},
+                "call_id": {"type": "string"},
+            },
+            "required": ["ambulance_id", "call_id"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "dispatch_bls",
+        "description": "Dispatch a BLS ambulance to a pending 911 call (Phase 2). Use triage_call first to decide if BLS is appropriate.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ambulance_id": {"type": "string", "enum": ["AMB_3", "AMB_4", "AMB_5"]},
+                "call_id": {"type": "string"},
+            },
+            "required": ["ambulance_id", "call_id"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "triage_call",
+        "description": "Decide what to do with a pending 911 call (Phase 2). Choices: dispatch_als (ALS needed), dispatch_bls (BLS fine), self_transport, callback (re-contact later), no_dispatch (cancel).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "call_id": {"type": "string"},
+                "decision": {
+                    "type": "string",
+                    "enum": ["dispatch_als", "dispatch_bls", "self_transport", "callback", "no_dispatch"],
+                },
+                "ambulance_id": {"type": "string", "description": "Required when decision is dispatch_als or dispatch_bls"},
+            },
+            "required": ["call_id", "decision"],
         },
     },
     {
@@ -153,6 +196,13 @@ City layout:
 - Ambulances: AMB_1, AMB_2 (ALS - advanced), AMB_3, AMB_4, AMB_5 (BLS - basic)
 - Priority: CARDIAC > STROKE > TRAUMA > GENERAL
 
+Phase 2 — Dispatch Cascade:
+- Incoming 911 calls arrive as pending_calls. You MUST triage each call with triage_call before dispatching.
+- dispatch_als commits an ALS unit (AMB_1/AMB_2) to a call. dispatch_bls commits a BLS unit (AMB_3/4/5).
+- Ground truth condition is hidden until the ambulance arrives on-scene.
+- For Phase 1 tasks (task1): use dispatch_ambulance to go directly to patient nodes.
+- For Phase 2 tasks: use triage_call to decide, then dispatch_als or dispatch_bls.
+
 Use the available tools to save patients. Always dispatch ambulances to patient locations, assign them to HOSP_A for cardiac cases, and prepare ORs before patients arrive.
 
 Use maintain_plan only when there is nothing useful to do."""
@@ -195,9 +245,29 @@ def format_observation(obs) -> str:
         for a in obs.alerts[-5:]:
             lines.append(f"  {a}")
 
+    if obs.pending_calls:
+        lines.append("\n## Pending 911 Calls:")
+        for c in obs.pending_calls:
+            lines.append(
+                f"  {c.call_id}: {c.category.value} | waiting={c.time_waiting}min | "
+                f"severity_est={c.estimated_severity:.1f} | loc={c.location_node}"
+                + (f" | patient_will_spawn={c.spawned_patient_id}" if c.spawned_patient_id else "")
+            )
+
+    if obs.recent_dispatch_outcomes:
+        lines.append("\n## Recent Dispatch Outcomes:")
+        for o in obs.recent_dispatch_outcomes[-5:]:
+            lines.append(
+                f"  {o.call_id}: decision={o.decision}"
+                + (f" | true={o.true_condition} (ALS={o.als_needed})" if o.true_condition else " | outcome=pending")
+            )
+
     lines.append(f"\nTime score preview: {obs.time_score_preview:.2f}")
+    lines.append(f"Vitals score preview: {obs.vitals_score_preview:.2f}")
     lines.append(f"Patients remaining: {obs.patients_remaining}")
     lines.append(f"Mutual aid remaining: {obs.mutual_aid_remaining}")
+    if obs.overcrowding_modifier > 1.0:
+        lines.append(f"WARNING: ED overcrowding active (modifier={obs.overcrowding_modifier:.1f}x)")
 
     return "\n".join(lines)
 
@@ -224,6 +294,9 @@ def _name_to_action(name: str, args: dict) -> dict:
     """Map function name to action dict for EnvClient."""
     mapping = {
         "dispatch_ambulance": lambda a: {"action_type": "dispatch_ambulance", **a},
+        "dispatch_als": lambda a: {"action_type": "dispatch_als", **a},
+        "dispatch_bls": lambda a: {"action_type": "dispatch_bls", **a},
+        "triage_call": lambda a: {"action_type": "triage_call", **a},
         "prepare_or": lambda a: {"action_type": "prepare_or", **a},
         "page_specialist": lambda a: {"action_type": "page_specialist", **a},
         "assign_hospital": lambda a: {"action_type": "assign_hospital", **a},
