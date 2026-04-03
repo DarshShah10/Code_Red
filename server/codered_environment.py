@@ -222,10 +222,6 @@ class CodeRedEnvironment(Environment):
                     "event": "patient_deceased",
                     "reason": "timeout",
                 })
-            # Check for treatment completion (patient reaches treating)
-            if p.status == "in_treatment" and p.treatment_complete_time is None:
-                # This will be set when surgery completes
-                pass
 
         # Ambulances
         self._ambulance_manager.tick()
@@ -452,9 +448,6 @@ class CodeRedEnvironment(Environment):
                         onset_step=self._state.step_count,
                     )
                     self._patients = self._patient_manager.patients
-                    # Snapshot vitals/status for reward computation
-                    self._prev_vitals[sec_patient.id] = sec_patient.vitals_score
-                    self._prev_patient_status[sec_patient.id] = sec_patient.status
                     self._alerts.append(f"Surge: secondary patient {sec_patient.id} ({cond}) arrived")
                     self._episode_log.append({
                         "step": self._state.step_count,
@@ -1347,8 +1340,6 @@ class CodeRedEnvironment(Environment):
                 onset_step=triggered_at_step, spawn_node=node,
             )
             self._patients = self._patient_manager.patients
-            self._prev_vitals[patient.id] = patient.vitals_score
-            self._prev_patient_status[patient.id] = patient.status
             self._alerts.append(f"CASCADE: Secondary {condition} patient {patient.id} spawned (reason: {reason})")
             self._episode_log.append({
                 "step": triggered_at_step, "patient_id": patient.id,
@@ -1427,8 +1418,6 @@ class CodeRedEnvironment(Environment):
         patient.observed_condition = true_condition
         call["spawned_patient_id"] = patient.id
         self._patients = self._patient_manager.patients
-        self._prev_vitals[patient.id] = patient.vitals_score
-        self._prev_patient_status[patient.id] = patient.status
         self._alerts.append(f"ON-SCENE: {category.value} call {call_id} force-spawned")
         self._episode_log.append({
             "step": self._state.step_count,

@@ -43,6 +43,7 @@ class PatientManager:
         self._task_id: str = "task1"
         self._patient_counter: int = 0
         self._onset_steps: dict[str, int] = {}
+        self._patients_dict_cache: Optional[dict[str, Patient]] = None
 
     def reset(self, task_id: str, rng: Optional[random.Random]) -> None:
         self._rng = rng or random.Random()
@@ -50,6 +51,7 @@ class PatientManager:
         self._patient_counter = 0
         self.patients = []
         self._onset_steps = {}
+        self._patients_dict_cache = None
         self._spawn_patients()
         for p in self.patients:
             self._onset_steps[p.id] = p.onset_step
@@ -131,20 +133,26 @@ class PatientManager:
                 overtime_ratio = ((effective_time - target_time) * overcrowding_modifier) / target_time
                 patient.vitals_score = max(0.0, 1.0 - overtime_ratio)
 
-            # Status escalation
-            if patient.vitals_score <= VITALS_DETERIORATING_THRESHOLD:
-                patient.status = "deteriorating"
-            if patient.vitals_score <= VITALS_CRITICAL_THRESHOLD:
-                patient.status = "critical"
+            # Status escalation (ordered: dead is subset of critical is subset of deteriorating)
             if patient.vitals_score <= VITALS_DEAD_THRESHOLD:
                 self.mark_deceased(patient.id, reason="cardiac_arrest")
+            elif patient.vitals_score <= VITALS_CRITICAL_THRESHOLD:
+                patient.status = "critical"
+            elif patient.vitals_score <= VITALS_DETERIORATING_THRESHOLD:
+                patient.status = "deteriorating"
 
     def get_onset_steps(self) -> dict[str, int]:
         return self._onset_steps.copy()
 
     @property
     def patients_dict(self) -> dict[str, Patient]:
-        return {p.id: p for p in self.patients}
+        if self._patients_dict_cache is None:
+            self._patients_dict_cache = {p.id: p for p in self.patients}
+        return self._patients_dict_cache
+
+    def get_all(self) -> list["Patient"]:
+        """Return all patients. Used by grader for cross-validation."""
+        return self.patients
 
     def spawn_secondary(
         self,
@@ -172,4 +180,5 @@ class PatientManager:
         )
         self.patients.append(patient)
         self._onset_steps[patient.id] = onset_step
+        self._patients_dict_cache = None
         return patient

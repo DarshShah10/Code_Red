@@ -276,7 +276,7 @@ def grade_from_environment(env) -> RubricResult:
     # =========================================================================
     # CROSS-VALIDATION: treatment_complete events vs patient manager outcomes
     # =========================================================================
-    patients = env._patient_manager.patients
+    patients = env._patient_manager.get_all()
 
     logged_treated = {
         e["patient_id"]

@@ -14,6 +14,9 @@ class MockPatientManager:
     def __init__(self, patients):
         self.patients = patients
 
+    def get_all(self):
+        return self.patients
+
 
 class MockEnv:
     def __init__(self, episode_log, patients):

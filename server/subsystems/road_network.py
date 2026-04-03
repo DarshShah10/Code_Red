@@ -40,6 +40,7 @@ class RoadNetwork:
         self._congestion_curves: dict = CONGESTION_CURVES
         self._episode_start_hour: int = EPISODE_START_HOUR
         self._step_count: int = 0  # tracks elapsed minutes for TOD
+        self._last_congestion_hour: Optional[int] = None  # cache: skip recompute if hour unchanged
 
         for edge in CITY_EDGES:
             key = self._edge_key(edge["from"], edge["to"])
@@ -54,8 +55,8 @@ class RoadNetwork:
 
     @property
     def edges(self) -> Dict[str, Edge]:
-        """Return the internal edge dictionary for test assertions."""
-        return self._edges
+        """Return a copy of the edge dictionary to prevent external mutation."""
+        return dict(self._edges)
 
     def get_travel_time(self, from_node: str, to_node: str) -> float:
         """Get effective travel time between two adjacent nodes."""
