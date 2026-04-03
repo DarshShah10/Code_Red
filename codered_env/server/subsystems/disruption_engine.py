@@ -8,12 +8,16 @@ DISRUPTION_TYPES_BY_TASK = {
     "task1": [],
     "task2": ["road_closure", "hospital_diversion", "accident"],
     "task3": ["road_closure", "hospital_diversion", "accident", "equipment_failure", "surge_event"],
+    "task4": ["road_closure", "hospital_diversion", "accident"],
+    "task5": ["road_closure", "hospital_diversion", "accident", "equipment_failure", "surge_event"],
 }
 
 BASE_PROB_PER_TASK = {
     "task1": 0.0,
     "task2": 0.05,
     "task3": 0.15,
+    "task4": 0.05,
+    "task5": 0.15,
 }
 
 
@@ -45,6 +49,7 @@ class DisruptionEngine:
         # Pre-generate disruption schedule for this episode
         max_steps = {
             "task1": 30, "task2": 45, "task3": 60,
+            "task4": 45, "task5": 60,
         }[task_id]
         self._scheduled_disruptions = self._generate_schedule(max_steps)
 

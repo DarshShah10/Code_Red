@@ -24,6 +24,20 @@ class PatientCondition(str, Enum):
     STROKE = "stroke"
     TRAUMA = "trauma"
     GENERAL = "general"
+    # Phase 2: Additional conditions from dispatch calls
+    ANXIETY = "anxiety"
+    GERD = "gerd"
+    PANIC = "panic"
+    HYPOGLYCEMIA = "hypoglycemia"
+    INTOXICATION = "intoxication"
+    SEIZURE = "seizure"
+    FRACTURE = "fracture"
+    SYNCOPE = "syncope"
+    MINOR = "minor"
+    RESPIRATORY = "respiratory"
+    ASTHMA = "asthma"
+    DEHYDRATION = "dehydration"
+    VIRAL = "viral"
 
 
 class PatientTier(str, Enum):
