@@ -299,6 +299,9 @@ def test_grader_icu_boarding_penalty():
     class MockPM:
         patients = []
 
+        def get_all(self):
+            return self.patients
+
     class MockEnv:
         _episode_log = []
         _patient_manager = MockPM()

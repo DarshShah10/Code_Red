@@ -47,10 +47,8 @@ class DisruptionEngine:
         self._intensity = self._rng.uniform(0.7, 1.3)
 
         # Pre-generate disruption schedule for this episode
-        max_steps = {
-            "task1": 30, "task2": 45, "task3": 60,
-            "task4": 45, "task5": 60,
-        }[task_id]
+        from .constants import TASK_CONFIG
+        max_steps = TASK_CONFIG.get(task_id, TASK_CONFIG["task1"])["max_steps"]
         self._scheduled_disruptions = self._generate_schedule(max_steps)
 
     def roll_disruptions(
