@@ -3,7 +3,9 @@ import pytest
 def test_openenv_yaml_valid():
     """Verify openenv.yaml is parseable and has required fields."""
     import yaml
-    with open("openenv.yaml") as f:
+    from pathlib import Path
+    yaml_path = Path(__file__).resolve().parent.parent / "openenv.yaml"
+    with open(yaml_path) as f:
         data = yaml.safe_load(f)
     assert data["spec_version"] == 1
     assert data["meta"]["name"] == "CodeRedEnv"

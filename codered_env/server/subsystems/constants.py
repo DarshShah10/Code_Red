@@ -397,3 +397,29 @@ CALL_SPAWN_INTERVAL: int = 8       # steps between new call spawns
 MAX_PENDING_CALLS: int = 5         # max calls in queue before oldest dropped
 FORCE_SPAWN_THRESHOLD: int = 20    # steps waiting → force patient spawn
 CALL_SEVERITY_ESCALATION: float = 0.05  # +5% severity per step waiting
+
+# =============================================================================
+# MUTUAL AID — shared between environment and subsystem
+# =============================================================================
+
+MA_SOURCE_NODE: str = "RAILWAY_XING"  # city center where MA ambulances enter
+MA_BASE_TRAVEL_TIME: int = 12  # minutes when road network fails (fallback)
+
+# =============================================================================
+# PROCEDURE MAPPING — shared across environment and subsystems
+# Maps patient condition → procedure type and required specialist
+# =============================================================================
+
+PROCEDURE_BY_CONDITION: dict[str, str] = {
+    "cardiac": "cardiac",
+    "stroke": "stroke",
+    "trauma": "trauma",
+    "general": "general",
+}
+
+SPECIALIST_BY_CONDITION: dict[str, str] = {
+    "cardiac": "cardiologist",
+    "stroke": "neurologist",
+    "trauma": "trauma_surgeon",
+    "general": "general_surgeon",
+}

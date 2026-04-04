@@ -88,10 +88,7 @@ class PatientManager:
             self.patients.append(patient)
 
     def get(self, patient_id: str) -> Optional[Patient]:
-        for p in self.patients:
-            if p.id == patient_id:
-                return p
-        return None
+        return self.patients_dict.get(patient_id)
 
     def mark_treated(self, patient_id: str, treatment_complete_time: int) -> None:
         """Mark patient as treated. CRITICAL: sets treatment_complete_time for grader."""

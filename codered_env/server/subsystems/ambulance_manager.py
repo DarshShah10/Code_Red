@@ -45,8 +45,8 @@ class AmbulanceManager:
         """
         Dispatch an ambulance to a target node.
         Computes shortest path via road_network.shortest_path().
-        When patient_id is set (ambulance going to pick up a patient),
-        adds SCENE_TIME to the ETA for on-scene assessment/treatment/packaging.
+        On arrival, the environment sets amb.patient_id and starts the scene
+        time countdown via tick().
         Returns {"success": bool, "reason": str | None}
         """
         from .constants import SCENE_TIME
@@ -61,7 +61,7 @@ class AmbulanceManager:
             route = road_network.shortest_path(amb.base_node, target_node)
             eta = road_network.route_travel_time(route)
             if patient_id is not None:
-                eta += SCENE_TIME  # Task 16: on-scene time before transport
+                eta += SCENE_TIME  # Signal: ambulance will have patient on board at arrival
         else:
             route = []
             eta = 0
@@ -70,7 +70,8 @@ class AmbulanceManager:
         amb.target_node = target_node
         amb.route = route
         amb.eta_minutes = eta
-        amb.patient_id = patient_id
+        if patient_id is not None:
+            amb.patient_id = patient_id
         return {"success": True}
 
     def arrive(self, ambulance_id: str) -> None:
