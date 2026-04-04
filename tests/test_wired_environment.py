@@ -322,3 +322,102 @@ def test_grader_icu_boarding_penalty():
     assert result.breakdown["icu_boarding_events"] == 1
     assert result.breakdown["icu_boarding_penalty"] == 0.05
 
+
+def test_dispatch_als_pending_call_ground_truth_backfill():
+    """
+    Regression: when a pending outcome entry (true_condition=None) exists from a
+    prior triage decision, and _spawn_patient_from_call fires, it must backfill
+    that entry in-place. Previously this produced two entries for the same call_id
+    (one with None, one with correct truth), poisoning the cascade classification
+    reward.
+    """
+    from codered_env.server.codered_environment import CodeRedEnvironment
+    from codered_env.server.models.actions import MaintainPlan
+
+    env = CodeRedEnvironment()
+    env.reset(seed=0, task_id="task4")  # task4 has use_call_queue=True
+
+    # Advance until at least one pending call exists
+    for _ in range(12):
+        env.step(MaintainPlan())
+
+    pending = env._pending_calls
+    assert len(pending) > 0
+    call = pending[0]
+    call_id = call["call_id"]
+    location_node = call["location_node"]
+    category = call["category"]
+
+    # Manually inject a pending outcome (simulates prior triage decision)
+    env._dispatch_outcomes_history.append({
+        "call_id": call_id,
+        "decision": "no_dispatch",
+        "category": category.value if hasattr(category, "value") else category,
+        "true_condition": None,
+        "als_needed": None,
+        "revealed_at_step": None,
+    })
+
+    pending_outcomes = [o for o in env._dispatch_outcomes_history if o["call_id"] == call_id]
+    assert len(pending_outcomes) == 1
+    assert pending_outcomes[0]["true_condition"] is None
+
+    # Manually trigger the spawn (this is what tick does via countdown expiry)
+    env._spawn_patient_from_call(call_id)
+
+    # Must STILL be exactly one entry (backfilled, not duplicated)
+    final_outcomes = [o for o in env._dispatch_outcomes_history if o["call_id"] == call_id]
+    assert len(final_outcomes) == 1, (
+        f"Expected 1 outcome for {call_id}, got {len(final_outcomes)} — "
+        f"duplicate was created instead of backfilling. Entries: {final_outcomes}"
+    )
+    assert final_outcomes[0]["true_condition"] is not None, (
+        f"Ground truth still None after spawn — backfill failed. Entry: {final_outcomes[0]}"
+    )
+    assert final_outcomes[0]["als_needed"] is not None
+    assert final_outcomes[0]["revealed_at_step"] is not None
+
+
+def test_spawned_secondary_patient_bootstrap_reward():
+    """
+    Regression: mid-episode secondary patients (cascade/surge spawns) must be
+    added to _prev_vitals so the agent gets a non-zero reward signal.
+    Previously, new patients had no prev_vitals entry → zero delta → agent
+    could not learn to respond to secondary patients via reward shaping.
+    """
+    from codered_env.server.codered_environment import CodeRedEnvironment
+    from codered_env.server.models.actions import MaintainPlan
+
+    env = CodeRedEnvironment()
+    env.reset(seed=0, task_id="task1")
+
+    # Ensure prev_vitals is bootstrapped for initial patients
+    initial_patient_ids = {p.id for p in env._patient_manager.patients}
+    for pid in initial_patient_ids:
+        assert pid in env._prev_vitals
+
+    # Spawn a secondary patient mid-episode (simulating cascade/surge)
+    new_patient = env._patient_manager.spawn_secondary(
+        condition="trauma",
+        onset_step=env._state.step_count,
+        reason="test_spawn",
+    )
+    assert new_patient.id not in env._prev_vitals, "Should not yet be in prev_vitals"
+
+    cum_before = env._state.cum_reward
+
+    # Take a step — the bootstrap runs inside _compute_step_reward before return
+    env.step(MaintainPlan())
+
+    # New patient must now be in _prev_vitals (bootstrap added it)
+    assert new_patient.id in env._prev_vitals, (
+        f"Secondary patient {new_patient.id} not bootstrapped into _prev_vitals"
+    )
+    assert env._prev_vitals[new_patient.id] == new_patient.vitals_score
+
+    # Cumulative reward must have increased (includes "dispatched" milestone for new patient)
+    assert env._state.cum_reward > cum_before, (
+        f"Expected cumulative reward to increase for new secondary patient; "
+        f"before={cum_before}, after={env._state.cum_reward}"
+    )
+
