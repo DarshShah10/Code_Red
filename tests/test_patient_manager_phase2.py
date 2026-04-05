@@ -5,7 +5,7 @@ import pytest
 def test_patient_dataclass_has_phase2_fields():
     """Patient dataclass has Phase 2 fields."""
     from dataclasses import fields
-    from codered_env.server.subsystems.patient_manager import Patient
+    from server.subsystems.patient_manager import Patient
     field_names = {f.name for f in fields(Patient)}
     assert "dispatch_call_id" in field_names
     assert "is_secondary" in field_names
@@ -15,7 +15,7 @@ def test_patient_dataclass_has_phase2_fields():
 
 def test_patient_default_phase2_fields():
     """Phase 2 fields have correct defaults."""
-    from codered_env.server.subsystems.patient_manager import Patient
+    from server.subsystems.patient_manager import Patient
     p = Patient(id="P1", condition="cardiac", status="waiting", location_node="node_A", onset_step=0)
     assert p.dispatch_call_id is None
     assert p.is_secondary is False
@@ -25,7 +25,7 @@ def test_patient_default_phase2_fields():
 
 def test_spawn_secondary_accepts_new_params():
     """spawn_secondary accepts triggered_by, reason, spawn_node params."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
+    from server.subsystems.patient_manager import PatientManager
     import random
     pm = PatientManager()
     pm._rng = random.Random(42)
@@ -42,7 +42,7 @@ def test_spawn_secondary_accepts_new_params():
 
 def test_spawn_secondary_sets_observed_condition():
     """Secondary patients have observed_condition set immediately."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
+    from server.subsystems.patient_manager import PatientManager
     import random
     pm = PatientManager()
     pm._rng = random.Random(99)
@@ -53,7 +53,7 @@ def test_spawn_secondary_sets_observed_condition():
 
 def test_tick_accepts_overcrowding_modifier():
     """tick() accepts overcrowding_modifier parameter without TypeError."""
-    from codered_env.server.subsystems.patient_manager import PatientManager
+    from server.subsystems.patient_manager import PatientManager
     import random
     pm = PatientManager()
     pm._rng = random.Random(42)
@@ -65,7 +65,7 @@ def test_tick_accepts_overcrowding_modifier():
 
 def test_patient_with_dispatch_call_id():
     """Patient can be created with dispatch_call_id."""
-    from codered_env.server.subsystems.patient_manager import Patient
+    from server.subsystems.patient_manager import Patient
     p = Patient(id="P_new", condition="general", status="waiting", location_node="node_A",
                 onset_step=5, dispatch_call_id="CALL_0001")
     assert p.dispatch_call_id == "CALL_0001"

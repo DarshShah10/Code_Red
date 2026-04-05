@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from codered_env.server.app import app
+from server.app import app
 
 client = TestClient(app)
 
@@ -7,10 +7,8 @@ def test_get_tasks():
     response = client.get("/tasks")
     assert response.status_code == 200
     data = response.json()
-    assert len(data["tasks"]) == 3
-    assert data["tasks"][0]["task_id"] == "task1"
-    assert data["tasks"][1]["task_id"] == "task2"
-    assert data["tasks"][2]["task_id"] == "task3"
+    assert len(data["tasks"]) == 5
+    assert [t["task_id"] for t in data["tasks"]] == ["task1", "task2", "task3", "task4", "task5"]
 
 def test_grader_endpoint_task1():
     response = client.post("/grader", json={"task_id": "task1", "seed": 42})

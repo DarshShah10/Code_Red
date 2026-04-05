@@ -1,8 +1,8 @@
 """End-to-end integration tests for all 3 tasks."""
 
-from codered_env.server.codered_environment import CodeRedEnvironment
-from codered_env.server.models.actions import MaintainPlan
-from codered_env.server.grader import grade_from_environment
+from server.codered_environment import CodeRedEnvironment
+from server.models.actions import MaintainPlan
+from server.grader import grade_from_environment
 
 
 def test_task1_e2e():

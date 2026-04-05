@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.cascade_engine import CascadeEngine, CascadeRule
+from server.subsystems.cascade_engine import CascadeEngine, CascadeRule
 
 
 def test_engine_initializes_with_seed():

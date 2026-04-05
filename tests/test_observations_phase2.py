@@ -4,7 +4,7 @@ import pytest
 
 def test_pending_calls_field_exists():
     """CodeRedObservation has pending_calls field."""
-    from codered_env.server.models.observations import CodeRedObservation
+    from server.models.observations import CodeRedObservation
     obs = CodeRedObservation(
         step=0,
         patients=[],
@@ -24,7 +24,7 @@ def test_pending_calls_field_exists():
 
 def test_recent_dispatch_outcomes_field_exists():
     """CodeRedObservation has recent_dispatch_outcomes field."""
-    from codered_env.server.models.observations import CodeRedObservation
+    from server.models.observations import CodeRedObservation
     obs = CodeRedObservation(
         step=0,
         patients=[],
@@ -44,7 +44,7 @@ def test_recent_dispatch_outcomes_field_exists():
 
 def test_overcrowding_modifier_field_exists():
     """CodeRedObservation has overcrowding_modifier field with bounds."""
-    from codered_env.server.models.observations import CodeRedObservation
+    from server.models.observations import CodeRedObservation
     obs = CodeRedObservation(
         step=0,
         patients=[],
@@ -64,8 +64,8 @@ def test_overcrowding_modifier_field_exists():
 
 def test_dispatch_call_pydantic_model_importable():
     """DispatchCall can be instantiated."""
-    from codered_env.server.models.entities import DispatchCall
-    from codered_env.server.subsystems.constants import DispatchCategory
+    from server.models.entities import DispatchCall
+    from server.subsystems.constants import DispatchCategory
     call = DispatchCall(
         call_id="CALL_0001",
         category=DispatchCategory.CHEST_PAIN,
@@ -80,7 +80,7 @@ def test_dispatch_call_pydantic_model_importable():
 
 def test_dispatch_outcome_pydantic_model_importable():
     """DispatchOutcome can be instantiated."""
-    from codered_env.server.models.entities import DispatchOutcome
+    from server.models.entities import DispatchOutcome
     outcome = DispatchOutcome(
         call_id="CALL_0001",
         decision="als",

@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.constants import (
+from server.subsystems.constants import (
     CITY_NODES,
     CITY_EDGES,
     HOSPITALS,
@@ -78,7 +78,7 @@ def test_hospital_a_best_outcomes():
 
 def test_get_current_shift():
     """get_current_shift returns correct shift based on hour."""
-    from codered_env.server.subsystems.constants import get_current_shift
+    from server.subsystems.constants import get_current_shift
 
     assert get_current_shift(episode_start_hour=8, step_count=0) == "day"    # hour 8
     assert get_current_shift(episode_start_hour=8, step_count=360) == "evening"  # hour 14
@@ -89,7 +89,7 @@ def test_get_current_shift():
 
 def test_shift_config_has_all_hospitals_and_shifts():
     """SHIFT_CONFIG must cover HOSP_A, HOSP_B, HOSP_C for day/evening/night."""
-    from codered_env.server.subsystems.constants import SHIFT_CONFIG
+    from server.subsystems.constants import SHIFT_CONFIG
 
     for shift in ["day", "evening", "night"]:
         assert shift in SHIFT_CONFIG
