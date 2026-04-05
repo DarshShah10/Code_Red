@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.disruption_engine import DisruptionEngine
+from server.subsystems.disruption_engine import DisruptionEngine
 
 def test_no_disruptions_task1():
     eng = DisruptionEngine()
@@ -21,7 +21,7 @@ def test_intensity_in_range():
 def test_road_closure_affects_target():
     eng = DisruptionEngine()
     eng.reset(seed=19, task_id="task2")
-    from codered_env.server.subsystems.road_network import RoadNetwork
+    from server.subsystems.road_network import RoadNetwork
     rn = RoadNetwork()
     events = eng.roll_disruptions(step=1, road_network=rn)
     assert any(e["disruption_type"] == "road_closure" for e in events)

@@ -1,7 +1,7 @@
 def test_task1_episode_runs_to_completion():
     """Task 1: single cardiac patient runs without crashing."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import (
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import (
         MaintainPlan, DispatchAmbulance, AssignHospital, PrepareOR, PageSpecialist,
     )
     env = CodeRedEnvironment()
@@ -28,8 +28,8 @@ def test_task1_episode_runs_to_completion():
 
 def test_grader_runs_without_error():
     """The grader can process an episode log without crashing."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     for _ in range(30):

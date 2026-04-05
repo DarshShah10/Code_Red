@@ -40,15 +40,20 @@ class Hospital:
 class HospitalSystem:
     """Manages hospital resources: ORs, specialists, ICU beds."""
 
-    def __init__(self):
-        from .constants import HOSPITALS
+    def __init__(self, episode_start_hour: int = 8):
+        from .constants import HOSPITALS, SHIFT_CONFIG, get_current_shift
 
         self._hospitals: Dict[str, Hospital] = {}
+        self._episode_start_hour: int = episode_start_hour
+        self._step_count: int = 0
+        self._current_shift: str = get_current_shift(episode_start_hour, 0)
+
         for h in HOSPITALS:
-            specialists = {
-                role: Specialist(available=data["available"], total=data["total"])
-                for role, data in h["specialists"].items()
-            }
+            specialists = {}
+            hosp_shift = SHIFT_CONFIG.get(self._current_shift, {}).get(h["id"], {})
+            for role, data in h["specialists"].items():
+                available = hosp_shift.get(role, data["available"])
+                specialists[role] = Specialist(available=available, total=data["total"])
             ors = [OR(index=i) for i in range(h["num_or"])]
             self._hospitals[h["id"]] = Hospital(
                 id=h["id"],
@@ -59,6 +64,32 @@ class HospitalSystem:
                 icu_beds=dict(h["icu_beds"]),
                 blood_stock=dict(h["blood_stock"]),
             )
+
+    def _update_shift(self) -> None:
+        """Detect and handle shift transitions, adjusting specialist availability."""
+        from .constants import SHIFT_CONFIG, get_current_shift
+
+        new_shift = get_current_shift(self._episode_start_hour, self._step_count)
+        if new_shift == self._current_shift:
+            return
+
+        self._current_shift = new_shift
+        shift_hospitals = SHIFT_CONFIG.get(new_shift, {})
+
+        for h in self._hospitals.values():
+            hosp_shift = shift_hospitals.get(h.id, {})
+            for role, specialist in h.specialists.items():
+                if specialist.total == 0:
+                    continue
+                shift_available = hosp_shift.get(role, specialist.available)
+                # Don't reduce below the number already committed (in surgery)
+                committed = specialist.total - specialist.available
+                new_available = min(shift_available, specialist.total - committed)
+                specialist.available = max(0, new_available)
+
+    def get_current_shift(self) -> str:
+        """Return the current shift name ('day', 'evening', 'night')."""
+        return self._current_shift
 
     def get(self, hosp_id: str) -> Optional[Hospital]:
         return self._hospitals.get(hosp_id)
@@ -216,11 +247,39 @@ class HospitalSystem:
         return spec.status == "available" and spec.available > 0
 
     # =========================================================================
+    # ICU Bed Management (Task 13)
+    # =========================================================================
+
+    def consume_icu_bed(self, hosp_id: str) -> bool:
+        """
+        Try to consume an ICU bed for an incoming patient.
+        Returns True if bed was consumed, False if ICU is full.
+        """
+        h = self._hospitals.get(hosp_id)
+        if h is None:
+            return False
+        if h.icu_beds["available"] <= 0:
+            return False
+        h.icu_beds["available"] -= 1
+        return True
+
+    def release_icu_bed(self, hosp_id: str) -> None:
+        """Release an ICU bed when a patient is discharged or deceased."""
+        h = self._hospitals.get(hosp_id)
+        if h is None:
+            return
+        if h.icu_beds["available"] < h.icu_beds["total"]:
+            h.icu_beds["available"] += 1
+
+    # =========================================================================
     # Time Advance
     # =========================================================================
 
     def tick(self) -> None:
-        """Advance all hospital timers by 1 minute."""
+        """Advance all hospital timers by 1 minute and handle shift transitions."""
+        self._step_count += 1
+        self._update_shift()
+
         for h in self._hospitals.values():
             # OR prep countdown
             for or_idx in list(h.or_prep_countdowns.keys()):
@@ -249,7 +308,8 @@ class HospitalSystem:
                 if spec.status in ("paged", "en_route") and spec.minutes_until_available > 0:
                     if spec.minutes_until_available <= 1:
                         spec.status = "available"
-                        spec.available += 1
+                        if spec.available < spec.total:
+                            spec.available += 1
                         spec.minutes_until_available = 0
                     else:
                         spec.minutes_until_available -= 1

@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.blood_bank import BloodBankSystem
+from server.subsystems.blood_bank import BloodBankSystem
 
 def test_hospital_C_has_limited_blood():
     bb = BloodBankSystem()

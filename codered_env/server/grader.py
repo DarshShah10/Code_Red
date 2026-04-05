@@ -14,6 +14,7 @@ class RubricResult:
     final_score: float    # weighted sum minus mutual_aid_penalty
     breakdown: dict        # human-readable per-axis details
     vitals_score_avg: float = 0.0  # Phase 1: informational only
+    cascade_score: float = 1.0    # Phase 2: secondary patient management
 
     def __post_init__(self):
         if self.breakdown is None:
@@ -29,7 +30,55 @@ class RubricResult:
             "final_score": self.final_score,
             "breakdown": self.breakdown,
             "vitals_score_avg": self.vitals_score_avg,
+            "cascade_score": self.cascade_score,
         }
+
+
+def grade_cascade_score(episode_log: list[dict]) -> float:
+    """
+    Scores how well the agent managed cascade effects.
+
+    Components:
+    - Secondary patients saved / total secondary patients (50% weight)
+    - Overcrowding events prevented (30% weight): fewer events = better, max 5 baseline
+    - News cycle surge handled (20% weight): normalized by count
+    """
+    secondary_events = [
+        e for e in episode_log if e.get("event") == "secondary_patient_spawned"
+    ]
+    secondary_patient_ids = {e["patient_id"] for e in secondary_events}
+
+    if len(secondary_patient_ids) == 0:
+        return 1.0  # No cascades = no penalty
+
+    secondary_saves = [
+        e for e in episode_log
+        if e.get("event") == "treatment_complete"
+        and e.get("patient_id") in secondary_patient_ids
+    ]
+    # Count deaths: either for secondary patient IDs OR explicitly marked as secondary
+    secondary_deaths = [
+        e for e in episode_log
+        if e.get("event") == "patient_deceased"
+        and (e.get("patient_id") in secondary_patient_ids or e.get("reason") == "secondary")
+    ]
+
+    num_secondary = len(secondary_patient_ids)
+    secondary_saved_count = len(secondary_saves)
+    secondary_death_count = len(secondary_deaths)
+
+    secondary_score = 1.0 - (secondary_death_count / num_secondary)
+
+    overcrowding_events = [
+        e for e in episode_log if e.get("event") == "overcrowding_started"
+    ]
+    overcrowding_score = max(0.0, 1.0 - len(overcrowding_events) / 5.0)
+
+    news_cycles = [e for e in episode_log if e.get("event") == "news_cycle"]
+    news_score = max(0.0, 1.0 - len(news_cycles) / 10.0)
+
+    cascade_score = 0.5 * secondary_score + 0.3 * overcrowding_score + 0.2 * news_score
+    return max(0.0, min(1.0, cascade_score))
 
 
 def grade_episode(episode_log: list[dict]) -> RubricResult:
@@ -168,9 +217,21 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
     mutual_aid_penalty = sum(penalties) / num_calls if num_calls > 0 else 0.0
 
     # =========================================================================
+    # CASCADE SCORE (Phase 2: secondary patient management)
+    # =========================================================================
+    cascade_score = grade_cascade_score(episode_log)
+
+    # =========================================================================
     # FINAL SCORE
     # =========================================================================
-    raw = 0.40 * time_score + 0.20 * efficiency + 0.20 * secondary_harm + 0.20 * prep_ready
+    raw = (
+        0.32 * time_score
+        + 0.16 * efficiency
+        + 0.16 * secondary_harm
+        + 0.16 * prep_ready
+        + 0.10 * vitals_score_avg
+        + 0.10 * cascade_score
+    )
     final_score = max(0.0, min(1.0, raw - mutual_aid_penalty))
 
     breakdown = {
@@ -178,6 +239,8 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         "efficiency": efficiency,
         "secondary_harm": secondary_harm,
         "prep_ready": prep_ready,
+        "vitals_score_avg": vitals_score_avg,
+        "cascade_score": cascade_score,
         "mutual_aid_penalty": mutual_aid_penalty,
         "unused_specialist_pages": unused_specialist,
         "wasted_or_preps": wasted_or_preps,
@@ -196,9 +259,75 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         final_score=round(final_score, 4),
         breakdown=breakdown,
         vitals_score_avg=round(vitals_score_avg, 4),
+        cascade_score=round(cascade_score, 4),
     )
 
 
 def grade_from_environment(env) -> RubricResult:
-    """Grade from a CodeRedEnvironment instance."""
-    return grade_episode(env.get_episode_log())
+    """
+    Grade from a CodeRedEnvironment instance with cross-validation.
+
+    Compares the episode log against the environment's patient manager to detect
+    silent mismatches between treatment_complete events and patient outcomes.
+    Mismatches are penalised proportionally and exposed in the breakdown.
+    """
+    log = env.get_episode_log()
+
+    # =========================================================================
+    # CROSS-VALIDATION: treatment_complete events vs patient manager outcomes
+    # =========================================================================
+    patients = env._patient_manager.get_all()
+
+    logged_treated = {
+        e["patient_id"]
+        for e in log
+        if e.get("event") == "treatment_complete"
+    }
+    patients_saved = {p.id for p in patients if p.outcome == "saved"}
+    patients_deceased = {p.id for p in patients if p.outcome == "deceased"}
+
+    # 1. Patients marked as saved in patient manager but no treatment_complete log
+    treated_missing_log = patients_saved - logged_treated
+
+    # 2. Patients with treatment_complete event but outcome is "deceased"
+    treated_but_deceased = logged_treated & patients_deceased
+
+    # 3. Patients marked as saved but also marked deceased in patient manager
+    #    (this is an internal inconsistency in patient_manager)
+    saved_but_deceased = patients_saved & patients_deceased
+
+    num_mismatches = (
+        len(treated_missing_log)
+        + len(treated_but_deceased)
+        + len(saved_but_deceased)
+    )
+
+    # Expose in breakdown
+    cross_validation_penalty = min(1.0, 0.2 * num_mismatches)
+
+    # =========================================================================
+    # ICU BOARDING PENALTY (Task 13)
+    # =========================================================================
+    boarding_events = [
+        e for e in log
+        if e.get("event") == "icu_boarding"
+    ]
+    num_boarding = len(boarding_events)
+    icu_boarding_penalty = min(1.0, 0.05 * num_boarding)
+
+    # Grade from the log first
+    result = grade_episode(log)
+
+    # Apply cross-validation penalty
+    result.final_score = max(0.0, result.final_score - cross_validation_penalty)
+    result.breakdown["cross_validation_mismatches"] = num_mismatches
+    result.breakdown["cross_validation_penalty"] = round(cross_validation_penalty, 4)
+    result.breakdown["treated_missing_log"] = sorted(treated_missing_log)
+    result.breakdown["treated_but_deceased"] = sorted(treated_but_deceased)
+
+    # Apply ICU boarding penalty
+    result.final_score = max(0.0, result.final_score - icu_boarding_penalty)
+    result.breakdown["icu_boarding_events"] = num_boarding
+    result.breakdown["icu_boarding_penalty"] = round(icu_boarding_penalty, 4)
+
+    return result

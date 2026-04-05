@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 def test_patient_valid():
-    from codered_env.server.models.entities import Patient
+    from server.models.entities import Patient
     p = Patient(
         patient_id="P1",
         condition="cardiac",
@@ -14,7 +14,7 @@ def test_patient_valid():
     assert p.status == "waiting"
 
 def test_patient_unknown_blood_type():
-    from codered_env.server.models.entities import Patient
+    from server.models.entities import Patient
     p = Patient(
         patient_id="P1",
         condition="cardiac",
@@ -25,8 +25,8 @@ def test_patient_unknown_blood_type():
     assert p.blood_type is None  # Unknown by default
 
 def test_hospital_state_has_correct_defaults():
-    from codered_env.server.models.entities import HospitalState, OperatingRoom
-    from codered_env.server.models.entities import SpecialistStatus
+    from server.models.entities import HospitalState, OperatingRoom
+    from server.models.entities import SpecialistStatus
     h = HospitalState(
         id="HOSP_A",
         node_id="AIIMS_PRAKASH",
@@ -39,13 +39,13 @@ def test_hospital_state_has_correct_defaults():
     assert len(h.operating_rooms) == 3  # Default 3 ORs
 
 def test_ambulance_state_defaults():
-    from codered_env.server.models.entities import AmbulanceState
+    from server.models.entities import AmbulanceState
     a = AmbulanceState(id="AMB_1", node_id="RAILWAY_XING", equipment="ALS")
     assert a.status == "available"
     assert a.route == []
 
 def test_road_network_state_has_edges():
-    from codered_env.server.models.entities import RoadNetworkState, EdgeState
+    from server.models.entities import RoadNetworkState, EdgeState
     r = RoadNetworkState()
     r.edges["RAILWAY_XING->NH45_BYPASS"] = EdgeState(
         from_node="RAILWAY_XING",

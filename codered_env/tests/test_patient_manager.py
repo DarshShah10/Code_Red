@@ -1,7 +1,7 @@
 import random
 
 import pytest
-from codered_env.server.subsystems.patient_manager import PatientManager
+from server.subsystems.patient_manager import PatientManager
 
 def test_patient_created():
     pm = PatientManager()

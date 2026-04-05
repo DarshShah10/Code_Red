@@ -5,6 +5,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from ..subsystems.constants import DispatchCategory
+
 
 class PatientStatus(str, Enum):
     WAITING = "waiting"
@@ -22,6 +24,20 @@ class PatientCondition(str, Enum):
     STROKE = "stroke"
     TRAUMA = "trauma"
     GENERAL = "general"
+    # Phase 2: Additional conditions from dispatch calls
+    ANXIETY = "anxiety"
+    GERD = "gerd"
+    PANIC = "panic"
+    HYPOGLYCEMIA = "hypoglycemia"
+    INTOXICATION = "intoxication"
+    SEIZURE = "seizure"
+    FRACTURE = "fracture"
+    SYNCOPE = "syncope"
+    MINOR = "minor"
+    RESPIRATORY = "respiratory"
+    ASTHMA = "asthma"
+    DEHYDRATION = "dehydration"
+    VIRAL = "viral"
 
 
 class PatientTier(str, Enum):
@@ -46,6 +62,12 @@ class Patient(BaseModel):
     treatment_complete_time: Optional[int] = None
     outcome: Optional[Literal["saved", "deceased"]] = None
     is_secondary: bool = False
+    icu_status: Optional[str] = None  # "admitted" | "boarding" | None
+
+    # Phase 2: Dispatch cascade fields
+    dispatch_call_id: Optional[str] = None  # links patient to originating call
+    cascade_trigger_reason: Optional[str] = None  # "witnessed_death", "news_cycle"
+    observed_condition: Optional[str] = None  # shown pre-reveal (None = hidden)
 
     model_config = {"extra": "forbid"}
 
@@ -153,5 +175,29 @@ class BloodBankState(BaseModel):
     hospital_id: str
     stocks: Dict[str, int]
     crossmatch_queue: List[Dict] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
+
+
+class DispatchCall(BaseModel):
+    """A 911 call awaiting a triage decision. True condition is hidden until on-scene."""
+    call_id: str
+    category: DispatchCategory
+    location_node: str
+    time_waiting: int = 0  # steps since call arrived
+    estimated_severity: float = 0.1  # 0.0-1.0, escalates with time_waiting
+    spawned_patient_id: Optional[str] = None  # set when patient spawns on-scene
+
+    model_config = {"extra": "forbid"}
+
+
+class DispatchOutcome(BaseModel):
+    """Result of a triage decision on a dispatch call. Ground truth revealed later."""
+    call_id: str
+    decision: str  # "als", "bls", "self_transport", "callback", "no_dispatch"
+    category: str  # dispatch category reported
+    true_condition: Optional[str] = None  # revealed on-scene arrival
+    als_needed: bool = False  # ground truth: was ALS actually required?
+    revealed_at_step: Optional[int] = None
 
     model_config = {"extra": "forbid"}

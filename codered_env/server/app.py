@@ -12,10 +12,10 @@ except ImportError as e:
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from codered_env.server.codered_environment import CodeRedEnvironment
-from codered_env.server.grader import grade_from_environment, RubricResult
-from codered_env.server.models import CodeRedAction, CodeRedObservation
-from codered_env.server.subsystems.constants import TASK_CONFIG
+from server.codered_environment import CodeRedEnvironment
+from server.grader import grade_from_environment, RubricResult
+from server.models import CodeRedAction, CodeRedObservation
+from server.subsystems.constants import TASK_CONFIG
 
 
 # Create the base app with OpenEnv
@@ -77,6 +77,30 @@ TASK_DEFINITIONS = {
         ],
         "mutual_aid": {"calls": 2, "stagger_min_steps": 8},
     },
+    "task4": {
+        "task_id": "task4",
+        "name": "Call Queue — Dispatch Triage (Phase 2)",
+        "description": "Incoming 911 calls arrive via dispatch queue. Agent must triage and dispatch appropriately. One disruption event.",
+        "max_steps": 45,
+        "disruption_schedule": [{"step": 20, "type": "road_closure"}],
+        "patients": [],
+        "use_call_queue": True,
+        "mutual_aid": {"calls": 1, "stagger_min_steps": 8},
+    },
+    "task5": {
+        "task_id": "task5",
+        "name": "Cascade Crisis — Full Phase 2",
+        "description": "Full Phase 2 simulation with dispatch triage, secondary patient cascades, overcrowding effects, and news cycle surges.",
+        "max_steps": 60,
+        "disruption_schedule": [
+            {"step": 15, "type": "accident"},
+            {"step": 30, "type": "road_closure"},
+        ],
+        "patients": [],
+        "use_call_queue": True,
+        "cascade_enabled": True,
+        "mutual_aid": {"calls": 2, "stagger_min_steps": 8},
+    },
 }
 
 
@@ -86,14 +110,14 @@ TASK_DEFINITIONS = {
 
 @app.get("/tasks")
 async def get_tasks() -> dict:
-    """Return task definitions for all 3 tasks."""
+    """Return task definitions for all 5 tasks."""
     return {
-        "tasks": [TASK_DEFINITIONS[tid] for tid in ["task1", "task2", "task3"]]
+        "tasks": [TASK_DEFINITIONS[tid] for tid in ["task1", "task2", "task3", "task4", "task5"]]
     }
 
 
 class GraderRequest(BaseModel):
-    task_id: Literal["task1", "task2", "task3"]
+    task_id: Literal["task1", "task2", "task3", "task4", "task5"]
     seed: int
 
 
@@ -104,7 +128,7 @@ async def grade_task(req: GraderRequest) -> dict:
     env.reset(seed=req.seed, task_id=req.task_id)
 
     # Run a simple baseline agent
-    from codered_env.server.models.actions import MaintainPlan
+    from server.models.actions import MaintainPlan
     done = False
     steps = 0
     while not done and steps < env.state.max_steps:
@@ -117,7 +141,7 @@ async def grade_task(req: GraderRequest) -> dict:
 
 
 class BaselineRequest(BaseModel):
-    task_id: Literal["task1", "task2", "task3"]
+    task_id: Literal["task1", "task2", "task3", "task4", "task5"]
     openai_api_key: str | None = None
     model: str | None = None
 
@@ -126,19 +150,19 @@ class BaselineRequest(BaseModel):
 async def run_baseline(req: BaselineRequest) -> dict:
     """Run OpenAI baseline agent on seeds [0, 1, 2] and return scores."""
     try:
-        from codered_env import baseline as baseline_module
+        from inference import run_agent as run_baseline_agent
     except ImportError:
         raise HTTPException(
             status_code=501,
-            detail="Baseline agent not implemented yet. Run manually with baseline.py"
+            detail="Inference agent not implemented yet. Run manually with inference.py"
         )
 
     scores = []
     for seed in [0, 1, 2]:
         try:
-            score = baseline_module.run_baseline_agent(
+            score = run_baseline_agent(
                 task_id=req.task_id, seed=seed,
-                api_key=req.openai_api_key, model=req.model
+                model=req.model or None,
             )
             scores.append(score)
         except Exception as e:
@@ -162,4 +186,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
-    main(port=args.port)
+    main()  # main() call for openenv validate

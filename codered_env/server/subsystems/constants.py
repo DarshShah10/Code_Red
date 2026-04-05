@@ -1,5 +1,6 @@
 """Static data for CodeRedEnv — Prakashnagar city layout, hospital definitions, ambulance fleet."""
 
+from enum import Enum
 from typing import Dict, List
 
 # =============================================================================
@@ -174,14 +175,117 @@ TASK_CONFIG: Dict[str, Dict] = {
         "mutual_aid_calls": 2,
         "max_steps": 60,
     },
+    "task4": {
+        "patients": [],
+        "disruption_prob": 0.05,
+        "mutual_aid_calls": 1,
+        "max_steps": 45,
+        "use_call_queue": True,   # Phase 2: patients arrive as dispatch calls
+    },
+    "task5": {
+        "patients": [],
+        "disruption_prob": 0.15,
+        "mutual_aid_calls": 2,
+        "max_steps": 60,
+        "use_call_queue": True,   # Phase 2: patients arrive as dispatch calls
+        "cascade_enabled": True,   # Phase 2: cascade engine active
+    },
 }
+
+# =============================================================================
+# HOSPITAL QUALITY VARIANCE — Task 12
+# =============================================================================
+
+# Mortality rate per hospital × condition (probability patient dies even after treatment).
+# HOSP_A = tertiary referral (AIIMS) — best outcomes
+# HOSP_B = district hospital — moderate outcomes
+# HOSP_C = community HC — stabilisation only; no OR, no surgery → 100% mortality for
+#          conditions requiring procedures (cardiac, stroke, trauma)
+HOSPITAL_MORTALITY_RATES: dict[str, dict[str, float]] = {
+    "HOSP_A": {
+        "cardiac": 0.08,
+        "stroke": 0.12,
+        "trauma": 0.15,
+        "general": 0.05,
+    },
+    "HOSP_B": {
+        "cardiac": 0.15,
+        "stroke": 0.25,   # no neurologist → worse stroke outcomes
+        "trauma": 0.20,
+        "general": 0.08,
+    },
+    "HOSP_C": {
+        # Community HC has no OR and no specialists — cannot treat emergent conditions
+        "cardiac": 1.00,
+        "stroke": 1.00,
+        "trauma": 1.00,
+        "general": 0.10,
+    },
+}
+
+# =============================================================================
+# TIME-OF-DAY CONGESTION CURVES — Task 14
+# Maps edge key to list of (hour, multiplier) pairs.
+# Hour 0 = midnight, episode start = 8am (hour 8).
+# NH45_BYPASS: heavy morning (7-9) and evening (17-20) peaks
+# Railway crossing: unpredictable due to gate
+# =============================================================================
+
+CONGESTION_CURVES: dict[str, list[tuple[int, float]]] = {
+    # Format: "NH45_BYPASS" applies to both directions of NH45 bypass
+    "NH45_BYPASS": [
+        (0, 0.8), (5, 0.8), (6, 1.2), (7, 1.8), (8, 2.0),
+        (9, 1.5), (10, 1.2), (16, 1.3), (17, 1.9), (18, 2.1),
+        (19, 1.7), (20, 1.2), (22, 0.9), (23, 0.8),
+    ],
+    "RAILWAY_XING": [
+        # Railway crossing: slow all day, worse during peak
+        (0, 1.0), (7, 1.3), (8, 1.6), (9, 1.3),
+        (17, 1.5), (18, 1.8), (19, 1.4), (22, 1.0),
+    ],
+    "RING_ROAD": [
+        # Ring road: moderate peak
+        (0, 0.8), (7, 1.1), (8, 1.5), (9, 1.2),
+        (17, 1.4), (18, 1.6), (19, 1.2), (22, 0.9),
+    ],
+    # Default: all other edges use base multiplier 1.0
+}
+
+EPISODE_START_HOUR: int = 8  # 8am
+
+
+def interpolate_congestion(curve: list[tuple[int, float]], hour: float) -> float:
+    """
+    Interpolate a congestion multiplier for a given fractional hour.
+    Curve is sorted list of (hour, multiplier) breakpoints.
+    Returns multiplier at the given hour, or 1.0 if curve is empty.
+    """
+    if not curve:
+        return 1.0
+    # Wrap hour to [0, 24)
+    hour = hour % 24.0
+    # Before first breakpoint
+    if hour <= curve[0][0]:
+        return curve[0][1]
+    # After last breakpoint
+    if hour >= curve[-1][0]:
+        return curve[-1][1]
+    # Find surrounding breakpoints
+    for i in range(len(curve) - 1):
+        h0, m0 = curve[i]
+        h1, m1 = curve[i + 1]
+        if h0 <= hour < h1:
+            t = (hour - h0) / (h1 - h0)
+            return m0 + t * (m1 - m0)
+    return 1.0
+
 
 # =============================================================================
 # PATIENT VITALS — Phase 1
 # =============================================================================
 
 VITALS_INITIAL = 1.0
-VITALS_STABLE_DECAY_RATE = 0.002   # per step in stable window (1 step = 1 min)
+VITALS_STABLE_DECAY_RATE = 0.0     # flat in stable window — no recovery without treatment
 VITALS_DETERIORATING_THRESHOLD = 0.75
 VITALS_CRITICAL_THRESHOLD = 0.4
 VITALS_DEAD_THRESHOLD = 0.0
@@ -189,9 +293,133 @@ VITALS_DEAD_THRESHOLD = 0.0
 # Reward shaping
 VITALS_DELTA_WEIGHT = 0.5
 MILESTONE_REWARDS = {
-    "dispatched": 0.05,
-    "in_treatment": 0.10,
-    "treated": 0.20,
-    "deceased": -0.30,
+    "dispatched": 0.20,
+    "in_treatment": 0.40,
+    "treated": 0.80,
+    "deceased": -0.80,
 }
 REWARD_STEP_CLAMP = (-1.0, 1.0)
+
+# =============================================================================
+# SHIFT-BASED STAFFING — Task 15
+# Specialist available counts by shift. Night (22-06) has reduced staffing.
+# =============================================================================
+
+SHIFT_CONFIG: dict[str, dict[str, dict[str, int]]] = {
+    # Specialist available counts per hospital × shift.
+    # HOSP_C always has 0 specialists (stabilisation only).
+    "day": {
+        "HOSP_A": {"cardiologist": 2, "neurologist": 1, "trauma_surgeon": 2},
+        "HOSP_B": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_C": {},
+    },
+    "evening": {
+        "HOSP_A": {"cardiologist": 1, "neurologist": 1, "trauma_surgeon": 1},
+        "HOSP_B": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_C": {},
+    },
+    "night": {
+        "HOSP_A": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_B": {"cardiologist": 1, "neurologist": 0, "trauma_surgeon": 1},
+        "HOSP_C": {},
+    },
+}
+
+
+def get_current_shift(episode_start_hour: int, step_count: int) -> str:
+    """
+    Return shift name ('day', 'evening', 'night') for a given step count.
+    day:      06:00 – 13:59  (hours 6-13)
+    evening:  14:00 – 21:59  (hours 14-21)
+    night:    22:00 – 05:59  (hours 22-23, 0-5)
+    """
+    hour = (episode_start_hour + step_count // 60) % 24
+    if 6 <= hour < 14:
+        return "day"
+    elif 14 <= hour < 22:
+        return "evening"
+    else:
+        return "night"
+
+
+# =============================================================================
+# FIXED ON-SCENE TIME — Task 16
+# Minutes spent on-scene before transport or return to base.
+# =============================================================================
+
+SCENE_TIME: int = 15  # minutes for assessment, treatment, packaging
+
+
+# =============================================================================
+# PRE-DISPATCH UNCERTAINTY — Phase 2 Task 1
+# Dispatch category → true condition probability table
+# Each category maps to a list of (condition, probability) pairs.
+# =============================================================================
+
+class DispatchCategory(str, Enum):
+    CHEST_PAIN = "chest_pain"
+    ALTERED_CONSCIOUSNESS = "altered_consciousness"
+    FALL = "fall"
+    BREATHING_DIFFICULTY = "breathing_difficulty"
+    GENERAL = "general"
+
+
+DISPATCH_CATEGORY_MAP: dict[DispatchCategory, list[tuple[str, float]]] = {
+    DispatchCategory.CHEST_PAIN: [
+        ("cardiac", 0.45), ("anxiety", 0.25), ("gerd", 0.20), ("panic", 0.10)
+    ],
+    DispatchCategory.ALTERED_CONSCIOUSNESS: [
+        ("hypoglycemia", 0.35), ("stroke", 0.30), ("intoxication", 0.25), ("seizure", 0.10)
+    ],
+    DispatchCategory.FALL: [
+        ("fracture", 0.35), ("trauma", 0.30), ("syncope", 0.25), ("minor", 0.10)
+    ],
+    DispatchCategory.BREATHING_DIFFICULTY: [
+        ("respiratory", 0.40), ("cardiac", 0.25), ("asthma", 0.25), ("panic", 0.10)
+    ],
+    DispatchCategory.GENERAL: [
+        ("general", 0.60), ("dehydration", 0.25), ("viral", 0.15)
+    ],
+}
+
+
+ALS_NEEDED_PROB: dict[DispatchCategory, float] = {
+    DispatchCategory.CHEST_PAIN: 0.60,
+    DispatchCategory.ALTERED_CONSCIOUSNESS: 0.50,
+    DispatchCategory.FALL: 0.30,
+    DispatchCategory.BREATHING_DIFFICULTY: 0.45,
+    DispatchCategory.GENERAL: 0.10,
+}
+
+
+# Call spawn configuration
+CALL_SPAWN_INTERVAL: int = 8       # steps between new call spawns
+MAX_PENDING_CALLS: int = 5         # max calls in queue before oldest dropped
+FORCE_SPAWN_THRESHOLD: int = 20    # steps waiting → force patient spawn
+CALL_SEVERITY_ESCALATION: float = 0.05  # +5% severity per step waiting
+
+# =============================================================================
+# MUTUAL AID — shared between environment and subsystem
+# =============================================================================
+
+MA_SOURCE_NODE: str = "RAILWAY_XING"  # city center where MA ambulances enter
+MA_BASE_TRAVEL_TIME: int = 12  # minutes when road network fails (fallback)
+
+# =============================================================================
+# PROCEDURE MAPPING — shared across environment and subsystems
+# Maps patient condition → procedure type and required specialist
+# =============================================================================
+
+PROCEDURE_BY_CONDITION: dict[str, str] = {
+    "cardiac": "cardiac",
+    "stroke": "stroke",
+    "trauma": "trauma",
+    "general": "general",
+}
+
+SPECIALIST_BY_CONDITION: dict[str, str] = {
+    "cardiac": "cardiologist",
+    "stroke": "neurologist",
+    "trauma": "trauma_surgeon",
+    "general": "general_surgeon",
+}

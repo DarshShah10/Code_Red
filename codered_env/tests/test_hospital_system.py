@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.hospital_system import HospitalSystem
+from server.subsystems.hospital_system import HospitalSystem
 
 def test_hospitals_initialized_from_constants():
     hs = HospitalSystem()
@@ -92,3 +92,113 @@ def test_hospital_C_cannot_handle_cardiac():
     hs = HospitalSystem()
     result = hs.prepare_or("HOSP_C", "cardiac")
     assert result["success"] is False
+
+
+def test_specialist_available_never_exceeds_total():
+    """Specialist available count should never exceed total (recovery guard)."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    # Force all cardiologists to be paged (available=0)
+    hosp_a.specialists["cardiologist"].available = 0
+    hosp_a.specialists["cardiologist"].status = "paged"
+    hosp_a.specialists["cardiologist"].minutes_until_available = 1
+    # Tick: specialist recovers — available should go to 1, not 2
+    hs.tick()
+    assert hosp_a.specialists["cardiologist"].available == 1
+    assert hosp_a.specialists["cardiologist"].status == "available"
+
+
+def test_consume_icu_bed_success():
+    """consume_icu_bed returns True and decrements count when beds available."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    initial = hosp_a.icu_beds["available"]
+    result = hs.consume_icu_bed("HOSP_A")
+    assert result is True
+    assert hosp_a.icu_beds["available"] == initial - 1
+
+
+def test_consume_icu_bed_fails_when_full():
+    """consume_icu_bed returns False when no beds available."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    # Exhaust all beds
+    while hosp_a.icu_beds["available"] > 0:
+        hs.consume_icu_bed("HOSP_A")
+    result = hs.consume_icu_bed("HOSP_A")
+    assert result is False
+
+
+def test_release_icu_bed_returns_bed():
+    """release_icu_bed increments available count."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    initial = hosp_a.icu_beds["available"]
+    hs.consume_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] == initial - 1
+    hs.release_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] == initial
+
+
+def test_release_icu_bed_caps_at_total():
+    """release_icu_bed does not exceed total."""
+    hs = HospitalSystem()
+    hosp_a = hs.get("HOSP_A")
+    total = hosp_a.icu_beds["total"]
+    hs.release_icu_bed("HOSP_A")
+    assert hosp_a.icu_beds["available"] <= total
+
+
+# =============================================================================
+# Shift-based staffing tests — Task 15
+# =============================================================================
+
+def test_shift_initialized_day():
+    """At init (hour=8), HOSP_A should have day-shift staffing."""
+    hs = HospitalSystem(episode_start_hour=8)
+    hosp_a = hs.get("HOSP_A")
+    assert hosp_a.specialists["cardiologist"].available == 2
+    assert hosp_a.specialists["neurologist"].available == 1
+    assert hosp_a.specialists["trauma_surgeon"].available == 2
+    assert hs.get_current_shift() == "day"
+
+
+def test_shift_transitions_after_6_hours():
+    """After 6 hours (step 360), shift should change from day to evening."""
+    hs = HospitalSystem(episode_start_hour=8)
+    assert hs.get_current_shift() == "day"
+    # 360 ticks = 360 minutes = 6 hours → hour becomes 14 → evening shift
+    for _ in range(360):
+        hs.tick()
+    assert hs.get_current_shift() == "evening"
+    hosp_a = hs.get("HOSP_A")
+    # Evening staffing: 1 cardiologist, 1 neurologist, 1 trauma surgeon
+    assert hosp_a.specialists["cardiologist"].available == 1
+    assert hosp_a.specialists["neurologist"].available == 1
+    assert hosp_a.specialists["trauma_surgeon"].available == 1
+
+
+def test_shift_transitions_to_night():
+    """After 14 hours (step 840), shift should be night with reduced staffing."""
+    hs = HospitalSystem(episode_start_hour=8)
+    # 840 ticks = 14 hours → hour becomes 22 → night shift
+    for _ in range(840):
+        hs.tick()
+    assert hs.get_current_shift() == "night"
+    hosp_a = hs.get("HOSP_A")
+    assert hosp_a.specialists["neurologist"].available == 0  # No neurologist at night
+    assert hosp_a.specialists["cardiologist"].available == 1
+
+
+def test_shift_change_preserves_committed_specialists():
+    """When a specialist is committed to surgery, shift change should not pull them."""
+    hs = HospitalSystem(episode_start_hour=8)
+    hosp_a = hs.get("HOSP_A")
+    # Simulate a cardiologist committed (status=busy, available=1 remaining)
+    hosp_a.specialists["cardiologist"].available = 1
+    hosp_a.specialists["cardiologist"].status = "busy"
+    # Evening shift caps cardiologist to 1 → committed=1, so new_available = min(1, 2-1) = 1
+    for _ in range(360):
+        hs.tick()
+    assert hosp_a.specialists["cardiologist"].available == 1  # Kept for surgery
+

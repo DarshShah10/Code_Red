@@ -1,10 +1,12 @@
-from codered_env.server.subsystems.road_network import RoadNetwork
+from server.subsystems.road_network import RoadNetwork
 
 
 def test_road_network_builds_from_constants():
     rn = RoadNetwork()
     assert len(rn.edges) == 15  # All 15 edges
-    assert rn.get_travel_time("RAILWAY_XING", "NH45_BYPASS") == 6
+    # Base time is 6; TOD congestion applied at init makes effective_time > base_time
+    edge = rn._get_edge("RAILWAY_XING", "NH45_BYPASS")
+    assert edge.base_time == 6
 
 
 def test_shortest_path():
@@ -47,3 +49,42 @@ def test_hospital_nodes_accessible():
         for other in ["RAJIV_CHOWK", "IT_HUB", "NH45_BYPASS"]:
             path = rn.shortest_path(other, hn)
             assert len(path) > 0
+
+
+def test_tod_congestion_applied_at_init():
+    """At step_count=0, episode starts at EPISODE_START_HOUR=8, NH45_BYPASS curve peak."""
+    from server.subsystems.constants import CONGESTION_CURVES
+    rn = RoadNetwork()
+    edge = rn._get_edge("NH45_BYPASS", "IT_HUB")
+    curve = CONGESTION_CURVES.get("NH45_BYPASS", [])
+    from server.subsystems.constants import interpolate_congestion
+    expected_mult = interpolate_congestion(curve, 8.0)
+    assert edge.congestion_multiplier == expected_mult
+    assert edge.congestion_multiplier > 1.0  # Peak hour → > 1.0
+
+
+def test_tod_congestion_changes_over_time():
+    """After 60 steps, hour increments and congestion multipliers update."""
+    rn = RoadNetwork()
+    edge = rn._get_edge("NH45_BYPASS", "IT_HUB")
+    initial_mult = edge.congestion_multiplier
+    rn.tick()  # step 1
+    rn.tick()  # step 2
+    # ... tick 58 more times to reach hour 9
+    for _ in range(58):
+        rn.tick()
+    # At hour 9, NH45_BYPASS multiplier should differ from hour 8
+    assert edge.congestion_multiplier != initial_mult
+
+
+def test_disruption_overrides_tod_congestion():
+    """Active disruption's congestion multiplier is not overwritten by TOD."""
+    rn = RoadNetwork()
+    edge = rn._get_edge("NH45_BYPASS", "IT_HUB")
+    mult_before = edge.congestion_multiplier
+    rn.set_disruption("NH45_BYPASS", "IT_HUB", "accident", remaining_steps=30)
+    assert edge.disrupted is True
+    # Accident sets multiplier to 3.0; subsequent ticks must not reset it
+    assert edge.congestion_multiplier == 3.0
+    rn.tick()
+    assert edge.congestion_multiplier == 3.0  # Still 3.0, not TOD value

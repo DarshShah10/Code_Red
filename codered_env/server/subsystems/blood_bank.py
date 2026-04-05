@@ -23,6 +23,7 @@ class BloodBankSystem:
                 hospital_id=h["id"],
                 stocks=dict(h["blood_stock"]),
             )
+        self._pending_completed: List[Dict] = []  # completed crossmatches from last tick()
 
     def get(self, hosp_id: str) -> Optional[BloodBank]:
         return self._banks.get(hosp_id)
@@ -78,17 +79,9 @@ class BloodBankSystem:
         return {"success": True}
 
     def flush_completed_crossmatches(self) -> List[Dict]:
-        """Called each tick. Returns list of completed crossmatches."""
-        completed = []
-        for bank in self._banks.values():
-            still_pending = []
-            for entry in bank.crossmatch_queue:
-                if entry["time_remaining"] <= 0:
-                    bank.stocks[entry["blood_type"]] -= entry["units"]
-                    completed.append(dict(entry))
-                else:
-                    still_pending.append(entry)
-            bank.crossmatch_queue = still_pending
+        """Drain and return completed crossmatches from the last tick(). Idempotent."""
+        completed = self._pending_completed
+        self._pending_completed = []
         return completed
 
     def transfer(
@@ -113,7 +106,15 @@ class BloodBankSystem:
         return {"success": True}
 
     def tick(self) -> None:
-        """Advance crossmatch timers by 1 minute."""
+        """Advance crossmatch timers and collect newly-completed entries in one pass."""
+        self._pending_completed = []
         for bank in self._banks.values():
+            still_pending = []
             for entry in bank.crossmatch_queue:
                 entry["time_remaining"] -= 1
+                if entry["time_remaining"] <= 0:
+                    bank.stocks[entry["blood_type"]] -= entry["units"]
+                    self._pending_completed.append(dict(entry))
+                else:
+                    still_pending.append(entry)
+            bank.crossmatch_queue = still_pending
