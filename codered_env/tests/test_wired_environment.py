@@ -4,8 +4,8 @@ import pytest
 
 
 def test_dispatch_routes_ambulance():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import DispatchAmbulance
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import DispatchAmbulance
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     obs = env.step(DispatchAmbulance(ambulance_id="AMB_1", target_node="NH45_BYPASS"))
@@ -15,8 +15,8 @@ def test_dispatch_routes_ambulance():
 
 
 def test_prepare_or_increments_prep_countdown():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import PrepareOR
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import PrepareOR
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     obs = env.step(PrepareOR(hospital_id="HOSP_A", procedure_type="cardiac"))
@@ -26,8 +26,8 @@ def test_prepare_or_increments_prep_countdown():
 
 
 def test_assign_hospital_sets_patient_destination():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import AssignHospital
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import AssignHospital
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     obs = env.step(AssignHospital(patient_id="P1", hospital_id="HOSP_A"))
@@ -36,8 +36,8 @@ def test_assign_hospital_sets_patient_destination():
 
 
 def test_patient_cannot_be_assigned_to_unsuitable_hospital():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import AssignHospital
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import AssignHospital
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     obs = env.step(AssignHospital(patient_id="P1", hospital_id="HOSP_C"))
@@ -47,8 +47,8 @@ def test_patient_cannot_be_assigned_to_unsuitable_hospital():
 
 
 def test_mutual_aid_not_available_task1():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import RequestMutualAid
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import RequestMutualAid
     env = CodeRedEnvironment()
     obs = env.reset(seed=0, task_id="task1")
     assert obs.mutual_aid_remaining == 0
@@ -58,8 +58,8 @@ def test_mutual_aid_not_available_task1():
 
 def test_mutual_aid_assigns_patient_and_logs_arrival():
     """MA ambulance arrival should auto-assign highest-priority patient and log patient_id."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import RequestMutualAid, MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import RequestMutualAid, MaintainPlan
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task2")  # task2 has 1 MA call
     obs = env.reset(seed=0, task_id="task2")
@@ -92,8 +92,8 @@ def test_mutual_aid_assigns_patient_and_logs_arrival():
 
 
 def test_blood_emergency_release():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import AllocateBlood
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import AllocateBlood
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     obs = env.step(AllocateBlood(
@@ -104,8 +104,8 @@ def test_blood_emergency_release():
 
 
 def test_timestep_increments_patient_time():
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")
     patient = env._patients[0]
@@ -123,8 +123,8 @@ def test_hospital_mortality_roll_hosp_c_emergent_always_dies():
     HOSP_C has 0 ORs, so surgery can't start there. We test the mortality roll
     logic directly by patching self._rng to return 0.5 (below threshold=1.0).
     """
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     env.reset(seed=42, task_id="task1")
@@ -171,8 +171,8 @@ def test_hospital_mortality_roll_survives_with_low_rate():
     """
     With HOSP_A cardiac (8% mortality) and rng forced above threshold, patient survives.
     """
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     env.reset(seed=42, task_id="task1")
@@ -214,8 +214,8 @@ def test_hospital_mortality_roll_seed_reproducibility():
     """
     Mortality roll is seeded — same seed → same survival outcome.
     """
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     outcomes_seed42 = []
     outcomes_seed99 = []
@@ -255,7 +255,7 @@ def test_icu_bed_consumed_on_arrival():
     """
     consume_icu_bed decrements count and returns True when beds available.
     """
-    from codered_env.server.subsystems.hospital_system import HospitalSystem
+    from server.subsystems.hospital_system import HospitalSystem
 
     hs = HospitalSystem()
     hosp_a = hs.get("HOSP_A")
@@ -276,7 +276,7 @@ def test_icu_boarding_when_beds_exhausted():
     When all ICU beds are consumed, consume_icu_bed returns False.
     Patient should get icu_status='boarding' in the environment.
     """
-    from codered_env.server.subsystems.hospital_system import HospitalSystem
+    from server.subsystems.hospital_system import HospitalSystem
 
     hs = HospitalSystem()
     hosp_a = hs.get("HOSP_A")
@@ -294,7 +294,7 @@ def test_grader_icu_boarding_penalty():
     """
     grade_from_environment applies ICU boarding penalty.
     """
-    from codered_env.server.grader import grade_from_environment
+    from server.grader import grade_from_environment
 
     class MockPM:
         patients = []
@@ -331,8 +331,8 @@ def test_dispatch_als_pending_call_ground_truth_backfill():
     (one with None, one with correct truth), poisoning the cascade classification
     reward.
     """
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task4")  # task4 has use_call_queue=True
@@ -385,8 +385,8 @@ def test_spawned_secondary_patient_bootstrap_reward():
     Previously, new patients had no prev_vitals entry → zero delta → agent
     could not learn to respond to secondary patients via reward shaping.
     """
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     env.reset(seed=0, task_id="task1")

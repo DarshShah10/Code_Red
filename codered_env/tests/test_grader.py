@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 
-from codered_env.server.grader import grade_episode, grade_from_environment
+from server.grader import grade_episode, grade_from_environment
 
 
 @dataclass

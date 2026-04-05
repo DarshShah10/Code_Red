@@ -1,8 +1,8 @@
 """Regression tests for MutualAidManager subsystem."""
 import pytest
 
-from codered_env.server.subsystems.mutual_aid import MutualAidManager, MAAmbulance, MAPending
-from codered_env.server.subsystems.constants import SCENE_TIME
+from server.subsystems.mutual_aid import MutualAidManager, MAAmbulance, MAPending
+from server.subsystems.constants import SCENE_TIME
 
 
 class MockPatient:

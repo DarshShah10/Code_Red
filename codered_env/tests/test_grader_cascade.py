@@ -9,7 +9,7 @@ def test_cascade_score_all_saved():
          "condition": "cardiac", "is_secondary": True},
         {"step": 10, "patient_id": "P1", "event": "treatment_complete"},
     ]
-    from codered_env.server.grader import grade_cascade_score
+    from server.grader import grade_cascade_score
     score = grade_cascade_score(episode_log)
     assert score == 1.0
 
@@ -21,7 +21,7 @@ def test_cascade_score_all_dead():
          "condition": "trauma", "is_secondary": True},
         {"step": 100, "patient_id": "P1", "event": "patient_deceased", "reason": "secondary"},
     ]
-    from codered_env.server.grader import grade_cascade_score
+    from server.grader import grade_cascade_score
     score = grade_cascade_score(episode_log)
     assert score == 0.5  # secondary_score=0.0, but overcrowding=1.0, news=1.0
 
@@ -36,7 +36,7 @@ def test_cascade_score_partial():
          "condition": "trauma", "is_secondary": True},
         {"step": 100, "patient_id": "P2", "event": "patient_deceased", "reason": "secondary"},
     ]
-    from codered_env.server.grader import grade_cascade_score
+    from server.grader import grade_cascade_score
     score = grade_cascade_score(episode_log)
     # secondary_score = 0.5 (1 death out of 2)
     # No overcrowding -> 1.0, no news -> 1.0
@@ -50,7 +50,7 @@ def test_cascade_score_no_cascades():
         {"step": 0, "patient_id": "P1", "event": "patient_created", "condition": "cardiac"},
         {"step": 10, "patient_id": "P1", "event": "treatment_complete"},
     ]
-    from codered_env.server.grader import grade_cascade_score
+    from server.grader import grade_cascade_score
     score = grade_cascade_score(episode_log)
     assert score == 1.0
 
@@ -64,7 +64,7 @@ def test_cascade_score_overcrowding_penalty():
         {"step": 5, "event": "overcrowding_started", "active_patient_count": 5},
         {"step": 15, "event": "overcrowding_started", "active_patient_count": 6},
     ]
-    from codered_env.server.grader import grade_cascade_score
+    from server.grader import grade_cascade_score
     score = grade_cascade_score(episode_log)
     # 2 overcrowding events -> 1.0 - 2/5 = 0.6
     # cascade = 0.5*1.0 + 0.3*0.6 + 0.2*1.0 = 0.88
@@ -73,7 +73,7 @@ def test_cascade_score_overcrowding_penalty():
 
 def test_rubric_result_has_cascade_score():
     """RubricResult dataclass has cascade_score field."""
-    from codered_env.server.grader import RubricResult
+    from server.grader import RubricResult
     result = RubricResult(
         time_score=0.8,
         efficiency=0.9,
@@ -89,7 +89,7 @@ def test_rubric_result_has_cascade_score():
 
 def test_rubric_result_cascade_score_defaults_to_one():
     """RubricResult cascade_score defaults to 1.0 when not provided."""
-    from codered_env.server.grader import RubricResult
+    from server.grader import RubricResult
     result = RubricResult(
         time_score=0.8,
         efficiency=0.9,

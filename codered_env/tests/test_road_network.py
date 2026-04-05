@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.road_network import RoadNetwork
+from server.subsystems.road_network import RoadNetwork
 
 
 def test_road_network_builds_from_constants():
@@ -53,11 +53,11 @@ def test_hospital_nodes_accessible():
 
 def test_tod_congestion_applied_at_init():
     """At step_count=0, episode starts at EPISODE_START_HOUR=8, NH45_BYPASS curve peak."""
-    from codered_env.server.subsystems.constants import CONGESTION_CURVES
+    from server.subsystems.constants import CONGESTION_CURVES
     rn = RoadNetwork()
     edge = rn._get_edge("NH45_BYPASS", "IT_HUB")
     curve = CONGESTION_CURVES.get("NH45_BYPASS", [])
-    from codered_env.server.subsystems.constants import interpolate_congestion
+    from server.subsystems.constants import interpolate_congestion
     expected_mult = interpolate_congestion(curve, 8.0)
     assert edge.congestion_multiplier == expected_mult
     assert edge.congestion_multiplier > 1.0  # Peak hour → > 1.0

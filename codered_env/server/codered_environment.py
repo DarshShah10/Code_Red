@@ -5,12 +5,12 @@ from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
 
-from .models import (
+from server.models import (
     CodeRedAction,
     CodeRedObservation,
     CodeRedState,
 )
-from .models.entities import (
+from server.models.entities import (
     AmbulanceState,
     AmbulanceEquipment,
     AmbulanceStatus,
@@ -26,7 +26,7 @@ from .models.entities import (
     RoadNetworkState,
     SpecialistStatus,
 )
-from .subsystems.constants import (
+from server.subsystems.constants import (
     AMBULANCES,
     BLOOD_TYPES,
     CITY_NODES,
@@ -48,14 +48,14 @@ class CodeRedEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self):
-        from .subsystems.road_network import RoadNetwork
-        from .subsystems.hospital_system import HospitalSystem
-        from .subsystems.blood_bank import BloodBankSystem
-        from .subsystems.disruption_engine import DisruptionEngine
-        from .subsystems.cascade_engine import CascadeEngine
-        from .subsystems.patient_manager import PatientManager
-        from .subsystems.ambulance_manager import AmbulanceManager
-        from .subsystems.mutual_aid import MutualAidManager
+        from server.subsystems.road_network import RoadNetwork
+        from server.subsystems.hospital_system import HospitalSystem
+        from server.subsystems.blood_bank import BloodBankSystem
+        from server.subsystems.disruption_engine import DisruptionEngine
+        from server.subsystems.cascade_engine import CascadeEngine
+        from server.subsystems.patient_manager import PatientManager
+        from server.subsystems.ambulance_manager import AmbulanceManager
+        from server.subsystems.mutual_aid import MutualAidManager
 
         self._rng: Optional[Any] = None
         self._patients: List[Patient] = []
@@ -100,14 +100,14 @@ class CodeRedEnvironment(Environment):
         self._rng = random.Random(seed)
 
         # Initialize all subsystems
-        from .subsystems.road_network import RoadNetwork
-        from .subsystems.hospital_system import HospitalSystem
-        from .subsystems.blood_bank import BloodBankSystem
-        from .subsystems.disruption_engine import DisruptionEngine
-        from .subsystems.cascade_engine import CascadeEngine
-        from .subsystems.patient_manager import PatientManager
-        from .subsystems.ambulance_manager import AmbulanceManager
-        from .subsystems.mutual_aid import MutualAidManager
+        from server.subsystems.road_network import RoadNetwork
+        from server.subsystems.hospital_system import HospitalSystem
+        from server.subsystems.blood_bank import BloodBankSystem
+        from server.subsystems.disruption_engine import DisruptionEngine
+        from server.subsystems.cascade_engine import CascadeEngine
+        from server.subsystems.patient_manager import PatientManager
+        from server.subsystems.ambulance_manager import AmbulanceManager
+        from server.subsystems.mutual_aid import MutualAidManager
 
         self._road_network = RoadNetwork()
         self._hospital_system = HospitalSystem(episode_start_hour=EPISODE_START_HOUR)
@@ -827,8 +827,8 @@ class CodeRedEnvironment(Environment):
 
     def _do_triage_call(self, action) -> None:
         """Handle TriageCall action - decide what to do with a pending dispatch call."""
-        from .models.entities import DispatchCategory
-        from .subsystems.constants import DISPATCH_CATEGORY_MAP, ALS_NEEDED_PROB
+        from server.models.entities import DispatchCategory
+        from server.subsystems.constants import DISPATCH_CATEGORY_MAP, ALS_NEEDED_PROB
         call = next((c for c in self._pending_calls if c["call_id"] == action.call_id), None)
         if call is None:
             self._alerts.append(f"TriageCall: call_id {action.call_id} not found")
@@ -948,7 +948,7 @@ class CodeRedEnvironment(Environment):
     def _compute_step_reward(self) -> float:
         """Dense reward: vitals delta shaping + milestone bonuses/penalties."""
         reward = 0.0
-        from .subsystems.constants import (
+        from server.subsystems.constants import (
             VITALS_DELTA_WEIGHT, MILESTONE_REWARDS, REWARD_STEP_CLAMP
         )
 
@@ -1162,7 +1162,7 @@ class CodeRedEnvironment(Environment):
             )
 
         # Build pending_calls for Phase 2
-        from .models.entities import DispatchCall as DispatchCallModel, DispatchOutcome as DispatchOutcomeModel
+        from server.models.entities import DispatchCall as DispatchCallModel, DispatchOutcome as DispatchOutcomeModel
         pending_calls_obs = [
             DispatchCallModel(
                 call_id=c["call_id"],
@@ -1236,7 +1236,7 @@ class CodeRedEnvironment(Environment):
             triggered_at_step = kwargs["triggered_at_step"]
             node = kwargs.get("spawn_node")
             if node is None:
-                from .subsystems.patient_manager import PatientManager
+                from server.subsystems.patient_manager import PatientManager
                 spawn_nodes = PatientManager._SPAWN_NODES
                 node = self._rng.choice(spawn_nodes)
             patient = self._patient_manager.spawn_secondary(
@@ -1268,15 +1268,15 @@ class CodeRedEnvironment(Environment):
 
     def _spawn_dispatch_call(self) -> None:
         """Spawn a new dispatch call into the queue."""
-        from .models.entities import DispatchCategory
-        from .subsystems.constants import DISPATCH_CATEGORY_MAP
+        from server.models.entities import DispatchCategory
+        from server.subsystems.constants import DISPATCH_CATEGORY_MAP
         if len(self._pending_calls) >= 5:
             return
         call_id = f"CALL_{self._state.step_count:04d}"
         categories = list(DISPATCH_CATEGORY_MAP.keys())
         weights = [0.20, 0.15, 0.25, 0.20, 0.20]
         category = self._rng.choices(categories, weights=weights)[0]
-        from .subsystems.patient_manager import PatientManager
+        from server.subsystems.patient_manager import PatientManager
         spawn_nodes = PatientManager._SPAWN_NODES
         location = self._rng.choice(spawn_nodes)
         call = {
@@ -1306,7 +1306,7 @@ class CodeRedEnvironment(Environment):
         self._pending_calls = [c for c in self._pending_calls if c["call_id"] != call_id]
         if call_id in self._pending_call_countdown:
             del self._pending_call_countdown[call_id]
-        from .subsystems.constants import DISPATCH_CATEGORY_MAP
+        from server.subsystems.constants import DISPATCH_CATEGORY_MAP
         category = call["category"]
         condition_choices = DISPATCH_CATEGORY_MAP[category]
         conditions, probs = zip(*condition_choices)

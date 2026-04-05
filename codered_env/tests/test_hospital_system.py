@@ -1,4 +1,4 @@
-from codered_env.server.subsystems.hospital_system import HospitalSystem
+from server.subsystems.hospital_system import HospitalSystem
 
 def test_hospitals_initialized_from_constants():
     hs = HospitalSystem()

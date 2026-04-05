@@ -4,7 +4,7 @@ import pytest
 
 def test_pending_calls_empty_for_task1():
     """Tasks 1-3 don't use the call queue (backward compat)."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
+    from server.codered_environment import CodeRedEnvironment
     env = CodeRedEnvironment()
     obs = env.reset(seed=0, task_id="task1")
     assert hasattr(obs, "pending_calls")
@@ -13,8 +13,8 @@ def test_pending_calls_empty_for_task1():
 
 def test_pending_calls_populated_for_task4():
     """Task 4 uses the call queue — calls spawn after a few steps."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=0, task_id="task4")
@@ -33,8 +33,8 @@ def test_pending_calls_populated_for_task4():
 
 def test_triage_call_action():
     """TriageCall action removes call from pending_calls."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan, TriageCall
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan, TriageCall
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=0, task_id="task4")
@@ -55,8 +55,8 @@ def test_triage_call_action():
 
 def test_overcrowding_modifier_in_observation():
     """Overcrowding modifier appears in observation."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=0, task_id="task4")
@@ -66,9 +66,9 @@ def test_overcrowding_modifier_in_observation():
 
 def test_grader_includes_cascade_score():
     """Grader output includes cascade_score field."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
-    from codered_env.server.grader import grade_from_environment
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
+    from server.grader import grade_from_environment
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=0, task_id="task4")
@@ -85,8 +85,8 @@ def test_grader_includes_cascade_score():
 
 def test_task4_e2e():
     """Task 4 end-to-end: call queue, triage, patient arrival."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan, TriageCall
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan, TriageCall
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=42, task_id="task4")
@@ -112,8 +112,8 @@ def test_task4_e2e():
 
 def test_task5_cascade_engine_active():
     """Task 5 has cascade_enabled — overcrowding modifier can be 1.2."""
-    from codered_env.server.codered_environment import CodeRedEnvironment
-    from codered_env.server.models.actions import MaintainPlan
+    from server.codered_environment import CodeRedEnvironment
+    from server.models.actions import MaintainPlan
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=99, task_id="task5")

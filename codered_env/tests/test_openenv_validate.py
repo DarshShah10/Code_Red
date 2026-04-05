@@ -15,12 +15,12 @@ def test_openenv_yaml_valid():
 def test_environment_subclass():
     """Verify CodeRedEnvironment is a valid OpenEnv Environment."""
     from openenv.core.env_server.interfaces import Environment
-    from codered_env.server.codered_environment import CodeRedEnvironment
+    from server.codered_environment import CodeRedEnvironment
     assert issubclass(CodeRedEnvironment, Environment)
 
 def test_all_action_types_importable():
     """All action types can be imported."""
-    from codered_env.server.models.actions import (
+    from server.models.actions import (
         DispatchAmbulance, PrepareOR, PageSpecialist, AssignHospital,
         PreemptOR, AllocateBlood, TransferBlood, RequestMutualAid,
         QueryBloodType, QueryORStatus, MaintainPlan,
