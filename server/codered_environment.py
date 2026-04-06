@@ -79,9 +79,15 @@ class CodeRedEnvironment(Environment):
         self._prev_patient_status: Dict[str, str] = {}
         self._pending_calls: List = []
         self._pending_call_countdown: Dict[str, int] = {}
+        self._pending_call_to_patient: Dict[str, Dict] = {}  # call_id -> {ambulance_id, location_node, spawned, spawned_patient_id}
+        # Track ambulance→pending_patient linkage for Phase 2 arrival detection.
+        # Keyed by ambulance_id. Keeps dispatch→spawn linkage even after call is removed from _pending_calls.
+        self._ambulance_pending_patient: Dict[str, Dict] = {}  # amb_id -> {call_id, location_node}
         self._dispatch_outcomes_history: List = []
         self._cascade_engine = CascadeEngine()
         self._step_count_since_last_call: int = 0
+        # Phase 2: track whether any patient has ever existed or a call was queued
+        self._phase2_has_activity: bool = False
 
     # =========================================================================
     # Public API
@@ -143,8 +149,11 @@ class CodeRedEnvironment(Environment):
         self._prev_patient_status = {}
         self._pending_calls = []
         self._pending_call_countdown = {}
+        self._pending_call_to_patient = {}
         self._dispatch_outcomes_history = []
         self._step_count_since_last_call = 0
+        self._phase2_has_activity = False
+        self._ambulance_pending_patient: Dict[str, Dict] = {}  # amb_id -> {call_id, location_node}
 
         # Log patient creation
         for p in self._patients:
@@ -181,7 +190,7 @@ class CodeRedEnvironment(Environment):
         # Execute action(s)
         self._execute_action(action)
 
-        # Check termination
+        # Check termination (after _advance_time so Phase 2 calls are visible)
         done = self._check_done()
 
         # Compute reward
@@ -189,7 +198,8 @@ class CodeRedEnvironment(Environment):
 
         self._state.cum_reward += reward
 
-        return self._build_observation()
+        obs = self._build_observation(done=done)
+        return obs
 
     @property
     def state(self) -> CodeRedState:
@@ -239,10 +249,46 @@ class CodeRedEnvironment(Environment):
             elif amb.status == "on_scene" and amb.eta_minutes == 0:
                 # Ambulance arrived at destination
                 if amb.patient_id:
-                    patient = next((pt for pt in self._patients if pt.id == amb.patient_id), None)
-                    if patient and patient.status == "dispatched":
-                        # Ambulance just arrived at patient — start scene time countdown
-                        patient.status = "transporting"
+                    # Phase 2: Handle placeholder patient_id (e.g., "CALL:xxx")
+                    resolved_patient_id = amb.patient_id
+                    if resolved_patient_id.startswith("CALL:"):
+                        # Resolve placeholder to actual patient
+                        call_id = resolved_patient_id[5:]  # Remove "CALL:" prefix
+                        pending_entry = self._pending_call_to_patient.get(call_id)
+                        if pending_entry and pending_entry.get("spawned"):
+                            resolved_patient_id = pending_entry["spawned_patient_id"]
+                        else:
+                            # Patient not spawned yet — can't pick up
+                            resolved_patient_id = None
+
+                    if resolved_patient_id:
+                        patient = next((pt for pt in self._patients if pt.id == resolved_patient_id), None)
+                        if patient and patient.status == "waiting":
+                            # Ambulance just arrived at patient — start scene time countdown
+                            patient.status = "transporting"
+                            patient.assigned_ambulance = amb_id
+                            amb.patient_id = resolved_patient_id
+                else:
+                    # Phase 2: ambulance arrived but no patient_id set (patient not yet spawned).
+                    # Check if this ambulance was dispatched to a call whose patient is still pending.
+                    pending = self._ambulance_pending_patient.get(amb_id)
+                    if pending:
+                        call_id = pending["call_id"]
+                        entry = self._pending_call_to_patient.get(call_id, {})
+                        if not entry.get("spawned"):
+                            # Patient not spawned yet — spawn it now and link
+                            self._spawn_patient_from_call(call_id)
+                            # Clean up ambulance tracking
+                            del self._ambulance_pending_patient[amb_id]
+                            # Reload after spawn
+                            reloaded = self._pending_call_to_patient.get(call_id, {})
+                            if reloaded and reloaded.get("spawned"):
+                                spawned_pid = reloaded["spawned_patient_id"]
+                                patient = next((pt for pt in self._patients if pt.id == spawned_pid), None)
+                                if patient and patient.status == "waiting":
+                                    patient.status = "transporting"
+                                    patient.assigned_ambulance = amb_id
+                                    amb.patient_id = spawned_pid
 
         # Mutual aid: delegate to subsystem
         def _ma_arrival_callback(ma_id: str, patient_id: str) -> None:
@@ -850,6 +896,31 @@ class CodeRedEnvironment(Environment):
             if not result["success"]:
                 self._alerts.append(f"Dispatch failed")
                 return
+
+            # Track call→patient linkage for arrival detection
+            # The patient hasn't spawned yet (will spawn when ambulance arrives or countdown expires).
+            # We store a pending linkage that gets resolved when patient spawns.
+            self._pending_call_to_patient[action.call_id] = {
+                "ambulance_id": action.ambulance_id,
+                "location_node": call["location_node"],
+                "spawned": False,
+                "spawned_patient_id": None,
+            }
+            self._phase2_has_activity = True
+            # Also track by ambulance_id for arrival handler lookup
+            self._ambulance_pending_patient[action.ambulance_id] = {
+                "call_id": action.call_id,
+                "location_node": call["location_node"],
+            }
+
+            # Set ambulance's target_node (don't set patient_id here — it would overwrite
+            # any pending linkage for a previous call on the same ambulance)
+            amb = self._ambulance_manager.get(action.ambulance_id)
+            if amb:
+                amb.target_node = call["location_node"]
+
+            # And set ambulance on the call dict for lookup
+            call["assigned_ambulance_id"] = action.ambulance_id
             call["spawned_patient_id"] = None
             category = call["category"]
             cat_val = category.value if hasattr(category, "value") else category
@@ -936,6 +1007,17 @@ class CodeRedEnvironment(Environment):
             if p.status not in ("treated", "deceased")
         ]
         if len(non_terminal) == 0:
+            use_call_queue = TASK_CONFIG.get(self._state.task_id, {}).get("use_call_queue", False)
+            has_pending = (
+                self._pending_calls
+                or self._pending_call_countdown
+                or any(not entry.get("spawned", False) for entry in self._pending_call_to_patient.values())
+            )
+            # Phase 2 (call queue): don't terminate early. Either:
+            # 1. No call activity yet (waiting for first call to spawn), OR
+            # 2. There are unresolved calls/countdowns still in the queue
+            if use_call_queue and (not self._phase2_has_activity or has_pending):
+                return False  # Keep running
             self._state.all_patients_terminal = True
             return True
         # Early termination: all non-deceased patients have vitals_score <= 0
@@ -1039,7 +1121,7 @@ class CodeRedEnvironment(Environment):
     # Observation
     # =========================================================================
 
-    def _build_observation(self) -> CodeRedObservation:
+    def _build_observation(self, done: bool = False) -> CodeRedObservation:
         """Build the current observation."""
         self._state.cum_reward = round(self._state.cum_reward, 4)
 
@@ -1193,6 +1275,7 @@ class CodeRedEnvironment(Environment):
         overcrowding_modifier = self._cascade_engine.check_overcrowding(len(active_patients))
 
         return CodeRedObservation(
+            done=done,
             step=self._state.step_count + 1,
             patients=patients,
             ambulances=amb_states,
@@ -1289,6 +1372,7 @@ class CodeRedEnvironment(Environment):
         }
         self._pending_calls.append(call)
         self._pending_call_countdown[call_id] = 20
+        self._phase2_has_activity = True
         self._alerts.append(f"CALL: {category.value} call {call_id} at {location}")
         self._episode_log.append({
             "step": self._state.step_count,
@@ -1320,6 +1404,26 @@ class CodeRedEnvironment(Environment):
         )
         patient.dispatch_call_id = call_id
         patient.observed_condition = true_condition
+        self._phase2_has_activity = True
+
+        # Link the patient to the ambulance that was dispatched
+        call_assigned_amb = call.get("assigned_ambulance_id")
+        if call_assigned_amb:
+            patient.assigned_ambulance = call_assigned_amb
+            amb = self._ambulance_manager.get(call_assigned_amb)
+            if amb:
+                amb.patient_id = patient.id  # resolve the CALL:xxx placeholder
+
+        # Mark the pending entry as spawned
+        pending_entry = self._pending_call_to_patient.get(call_id)
+        if pending_entry:
+            pending_entry["spawned"] = True
+            pending_entry["spawned_patient_id"] = patient.id
+            # Clean up ambulance→pending mapping
+            amb_id = pending_entry.get("ambulance_id")
+            if amb_id and self._ambulance_pending_patient.get(amb_id, {}).get("call_id") == call_id:
+                del self._ambulance_pending_patient[amb_id]
+
         call["spawned_patient_id"] = patient.id
         self._patients = self._patient_manager.patients
         self._alerts.append(f"ON-SCENE: {category.value} call {call_id} force-spawned")
