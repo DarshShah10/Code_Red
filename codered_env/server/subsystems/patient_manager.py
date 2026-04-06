@@ -12,6 +12,7 @@ class Patient:
     status: str  # waiting | dispatched | in_treatment | treated | deceased
     blood_type: Optional[str] = None
     assigned_hospital: Optional[str] = None
+    assigned_ambulance: Optional[str] = None  # ambulance assigned to this patient
     location_node: str = ""
     onset_step: int = 0
     treatment_complete_time: Optional[int] = None  # MUST be set on treatment

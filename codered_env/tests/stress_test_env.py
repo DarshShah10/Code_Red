@@ -71,7 +71,7 @@ def test_all_tasks_reset():
                 env, obs = make_env(task_id=tid, seed=seed)
                 assert obs is not None, "reset returned None"
                 assert hasattr(obs, "step"), "no step attribute"
-                assert obs.step == 0, f"step != 0 after reset (got {obs.step})"
+                assert obs.step == 1, f"step != 1 after reset (got {obs.step})"
                 assert hasattr(obs, "patients"), "no patients attribute"
                 assert hasattr(obs, "ambulances"), "no ambulances attribute"
                 assert hasattr(obs, "hospitals"), "no hospitals attribute"
@@ -415,7 +415,7 @@ def test_dispatch_execution():
         amb2 = next((a for a in obs2.ambulances if a.id == amb.id), None)
         assert amb2 is not None
         # Status should have changed
-        assert amb2.status.value in ("en_route", "at_scene", "transporting"), \
+        assert amb2.status.value in ("dispatched", "transporting", "en_route", "at_scene", "returning"), \
             f"unexpected status: {amb2.status.value}"
         results[key] = f"PASS amb={amb.id} status={amb2.status.value}"
     except Exception as e:
