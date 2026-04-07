@@ -270,7 +270,7 @@ class CodeRedEnvironment(Environment):
                             amb.patient_id = resolved_patient_id
                 else:
                     # Phase 2: ambulance arrived but no patient_id set (patient not yet spawned).
-                    # Check if this ambulance was dispatched to a call whose patient is still pending.
+                    # Spawn the patient via countdown expiry or ambulance arrival and link them.
                     pending = self._ambulance_pending_patient.get(amb_id)
                     if pending:
                         call_id = pending["call_id"]
@@ -278,8 +278,6 @@ class CodeRedEnvironment(Environment):
                         if not entry.get("spawned"):
                             # Patient not spawned yet — spawn it now and link
                             self._spawn_patient_from_call(call_id)
-                            # Clean up ambulance tracking
-                            del self._ambulance_pending_patient[amb_id]
                             # Reload after spawn
                             reloaded = self._pending_call_to_patient.get(call_id, {})
                             if reloaded and reloaded.get("spawned"):
@@ -1383,9 +1381,36 @@ class CodeRedEnvironment(Environment):
         })
 
     def _spawn_patient_from_call(self, call_id: str) -> None:
-        """Force-spawn a patient when a call's countdown expires."""
+        """Force-spawn a patient when a call's countdown expires or ambulance arrives."""
         call = next((c for c in self._pending_calls if c["call_id"] == call_id), None)
         if call is None:
+            # Call already removed — try to recover from pending linkage
+            entry = self._pending_call_to_patient.get(call_id, {})
+            amb_id = entry.get("ambulance_id")
+            loc = entry.get("location_node", "")
+            if loc and amb_id:
+                from server.subsystems.constants import DISPATCH_CATEGORY_MAP
+                from server.subsystems.patient_manager import PatientManager
+                categories = list(DISPATCH_CATEGORY_MAP.keys())
+                # Use the category from the dispatch outcome history if available
+                outcome = next((o for o in self._dispatch_outcomes_history if o["call_id"] == call_id), None)
+                category = outcome["category"] if outcome else categories[0]
+                conditions, probs = zip(*DISPATCH_CATEGORY_MAP[category])
+                true_condition = self._rng.choices(list(conditions), weights=list(probs))[0]
+                patient = self._patient_manager.spawn_secondary(
+                    condition=true_condition, triggered_by=None, reason="forced_spawn",
+                    onset_step=self._state.step_count, spawn_node=loc,
+                )
+                patient.dispatch_call_id = call_id
+                patient.observed_condition = true_condition
+                self._phase2_has_activity = True
+                patient.assigned_ambulance = amb_id
+                amb = self._ambulance_manager.get(amb_id)
+                if amb:
+                    amb.patient_id = patient.id
+                entry["spawned"] = True
+                entry["spawned_patient_id"] = patient.id
+                self._patients = self._patient_manager.patients
             return
         self._pending_calls = [c for c in self._pending_calls if c["call_id"] != call_id]
         if call_id in self._pending_call_countdown:
