@@ -128,7 +128,8 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
                 scores.append(0.0)
         time_score = sum(scores) / len(scores) if scores else 1.0
     else:
-        time_score = 1.0
+        # Empty episode: no patients processed — agent gets 0.0, not 1.0
+        time_score = 0.0
 
     # =========================================================================
     # VITALS SCORE AVERAGE (informational — not yet in final_score)
@@ -233,6 +234,39 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         + 0.10 * cascade_score
     )
     final_score = max(0.0, min(1.0, raw - mutual_aid_penalty))
+
+    # =========================================================================
+    # ANTI-EXPLOIT: empty/no-action episode guard
+    # =========================================================================
+    patient_events = {
+        e["patient_id"]
+        for e in episode_log
+        if e.get("event") in ("patient_created", "treatment_complete", "patient_deceased")
+    }
+    if len(patient_events) == 0:
+        # No patients processed — agent did nothing, gets 0.0
+        final_score = 0.0
+        breakdown = {
+            "time_score": 0.0,
+            "efficiency": 1.0,
+            "secondary_harm": 1.0,
+            "prep_ready": 1.0,
+            "vitals_score_avg": 1.0,
+            "cascade_score": 1.0,
+            "mutual_aid_penalty": 0.0,
+            "anti_exploit": "no_patients_processed",
+        }
+        return RubricResult(
+            time_score=0.0,
+            efficiency=1.0,
+            secondary_harm=1.0,
+            prep_ready=1.0,
+            mutual_aid_penalty=0.0,
+            final_score=0.0,
+            breakdown=breakdown,
+            vitals_score_avg=1.0,
+            cascade_score=1.0,
+        )
 
     breakdown = {
         "time_score": time_score,

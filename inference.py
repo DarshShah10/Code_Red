@@ -486,7 +486,7 @@ def call_model(prompt: str, model: str | None = None) -> str:
             ],
             tools=FUNCTIONS,
             tool_choice="auto",
-            temperature=0.7,
+            temperature=0.0,  # deterministic for reproducible benchmarking
             max_tokens=200,
         )
         msg = completion.choices[0].message

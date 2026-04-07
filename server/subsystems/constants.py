@@ -153,6 +153,7 @@ TASK_CONFIG: Dict[str, Dict] = {
         "disruption_prob": 0.0,
         "mutual_aid_calls": 0,
         "max_steps": 30,
+        "cascade_enabled": False,  # single-patient tutorial: no cascade effects
     },
     "task2": {
         "patients": [
