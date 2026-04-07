@@ -191,6 +191,17 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
                 arrival_scores.append(0.0)
     prep_ready = sum(arrival_scores) / len(arrival_scores) if arrival_scores else 1.0
 
+    # Preemption penalty: each preempted surgery reduces prep_ready
+    preempted_surgeries = sum(
+        1 for e in episode_log
+        if e.get("event") == "surgery_aborted" and e.get("reason") == "or_preempted"
+    )
+    preemptive_actions = sum(
+        1 for e in episode_log
+        if e.get("event") == "action_preempt_or"
+    )
+    prep_ready = max(0.0, prep_ready - 0.1 * preempted_surgeries)
+
     # =========================================================================
     # MUTUAL AID PENALTY
     # =========================================================================
@@ -268,6 +279,38 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
             cascade_score=1.0,
         )
 
+    # =========================================================================
+    # ANTI-EXPLOIT: E2 Idle strategy detection
+    # =========================================================================
+    dispatches = [e for e in episode_log if e.get("event") in ("dispatch", "action_dispatch")]
+    treatments = [e for e in episode_log if e.get("event") == "treatment_complete"]
+    if not dispatches and not treatments and len(patient_times) > 0:
+        all_deceased = all(not data.get("treated", False) for data in patient_times.values())
+        if all_deceased:
+            # Complete inaction — all patients died with no agent action
+            time_score = max(0.0, time_score - 0.3)
+            breakdown_extra = {"anti_exploit": "complete_inaction"}
+        else:
+            breakdown_extra = {}
+    else:
+        breakdown_extra = {}
+
+    # E1: Cascade farming penalty — delayed primary treatment + cascade spawns
+    cascade_patients = [e for e in episode_log if e.get("event") == "secondary_patient_spawned"]
+    primary_patients = [e for e in episode_log if e.get("event") == "patient_created" and not e.get("is_secondary")]
+    if cascade_patients and primary_patients:
+        primary_pid = primary_patients[0].get("patient_id")
+        for entry in episode_log:
+            if (entry.get("event") == "treatment_complete"
+                    and entry.get("patient_id") == primary_pid):
+                eff = entry.get("effective_time", 0)
+                tgt = entry.get("target_time", 90)
+                if eff > tgt * 1.5:  # 50% over target
+                    farming_penalty = min(0.2, 0.1 * len(cascade_patients))
+                    time_score = max(0.0, time_score - farming_penalty)
+                    breakdown_extra["cascade_farming_penalty"] = round(farming_penalty, 4)
+                break
+
     breakdown = {
         "time_score": time_score,
         "efficiency": efficiency,
@@ -282,7 +325,21 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
         "secondary_deaths": secondary_deaths,
         "secondary_patients": secondary_patients,
         "mutual_aid_calls": num_calls,
+        "preemptive_actions": preemptive_actions,
+        "preempted_surgeries": preempted_surgeries,
     }
+    breakdown.update(breakdown_extra)
+
+    # Recompute final score with adjusted time_score
+    raw = (
+        0.32 * time_score
+        + 0.16 * efficiency
+        + 0.16 * secondary_harm
+        + 0.16 * prep_ready
+        + 0.10 * vitals_score_avg
+        + 0.10 * cascade_score
+    )
+    final_score = max(0.0, min(1.0, raw - mutual_aid_penalty))
 
     return RubricResult(
         time_score=round(time_score, 4),

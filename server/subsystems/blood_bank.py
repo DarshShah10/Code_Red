@@ -24,6 +24,7 @@ class BloodBankSystem:
                 stocks=dict(h["blood_stock"]),
             )
         self._pending_completed: List[Dict] = []  # completed crossmatches from last tick()
+        self._emergency_released: Dict[str, int] = {h["id"]: 0 for h in HOSPITALS}
 
     def get(self, hosp_id: str) -> Optional[BloodBank]:
         return self._banks.get(hosp_id)
@@ -42,16 +43,31 @@ class BloodBankSystem:
         blood_type: str,
         units: int,
     ) -> Dict:
-        """Instant O-Neg emergency release."""
+        """Instant O-Neg emergency release with per-call and per-episode caps."""
         bank = self._banks.get(hosp_id)
         if bank is None:
             return {"success": False, "reason": f"Hospital {hosp_id} not found"}
-        if bank.stocks.get("O_NEG", 0) < units:
+
+        # Per-call cap: max 4 units per request
+        units = min(units, 4)
+
+        # Per-episode cap: max 4 units total per hospital
+        total_released = self._emergency_released.get(hosp_id, 0)
+        if total_released >= 4:
             return {
                 "success": False,
-                "reason": f"Insufficient O_NEG at {hosp_id}: have {bank.stocks.get('O_NEG', 0)}, need {units}"
+                "reason": f"Emergency reserves exhausted at {hosp_id} (max 4 units/episode)"
             }
+
+        available = bank.stocks.get("O_NEG", 0)
+        if available < units:
+            return {
+                "success": False,
+                "reason": f"Insufficient O_NEG at {hosp_id}: have {available}, need {units}"
+            }
+
         bank.stocks["O_NEG"] -= units
+        self._emergency_released[hosp_id] = total_released + units
         return {"success": True, "blood_type": "O_NEG", "units": units}
 
     def start_crossmatch(

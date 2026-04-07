@@ -130,7 +130,11 @@ class CascadeEngine:
                 )
         elif effect == "news_cycle":
             self._news_cycle_steps_remaining = params["steps"]
-            self._pending_surge_probability += params["surge_prob_boost"]
+            # Cap at 1.0 to prevent unbounded probability accumulation
+            self._pending_surge_probability = min(
+                1.0,
+                self._pending_surge_probability + params["surge_prob_boost"]
+            )
             if self._callback:
                 self._callback(
                     "news_cycle",

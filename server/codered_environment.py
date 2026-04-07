@@ -154,6 +154,8 @@ class CodeRedEnvironment(Environment):
         self._step_count_since_last_call = 0
         self._phase2_has_activity = False
         self._ambulance_pending_patient: Dict[str, Dict] = {}  # amb_id -> {call_id, location_node}
+        # Exploit detection: track repeated actions
+        self._action_counts: Dict[str, int] = {}
 
         # Log patient creation
         for p in self._patients:
@@ -190,13 +192,18 @@ class CodeRedEnvironment(Environment):
         # Execute action(s)
         self._execute_action(action)
 
-        # Check termination (after _advance_time so Phase 2 calls are visible)
-        done = self._check_done()
+        # E3: Action spam rate limiting — penalize after 10 identical actions
+        action_key = type(action).__name__
+        self._action_counts[action_key] = self._action_counts.get(action_key, 0) + 1
+        if self._action_counts[action_key] > 10 and len(self._alerts) < 3:
+            self._alerts.append(f"Action spam: {action_key} repeated {self._action_counts[action_key]} times")
 
-        # Compute reward
+        # Compute reward BEFORE done check (OpenEnv spec compliance — Task 14)
         reward = self._compute_step_reward()
-
         self._state.cum_reward += reward
+
+        # Check termination
+        done = self._check_done()
 
         obs = self._build_observation(done=done)
         return obs
@@ -235,6 +242,9 @@ class CodeRedEnvironment(Environment):
                     "event": "patient_deceased",
                     "reason": "timeout",
                 })
+                # Release ICU bed if patient was admitted (Task 4)
+                if p.icu_status == "admitted" and p.assigned_hospital:
+                    self._hospital_system.release_icu_bed(p.assigned_hospital)
 
         # Ambulances
         self._ambulance_manager.tick()
@@ -303,6 +313,18 @@ class CodeRedEnvironment(Environment):
             arrival_callback=_ma_arrival_callback,
         )
         for event in ma_arrivals:
+            # When patient was auto-assigned at arrival (different from request time),
+            # update the mutual_aid_called log entry so grader can match by patient_id
+            if event.get("patient_changed") and event.get("patient_id"):
+                for entry in self._episode_log:
+                    if (entry.get("event") == "mutual_aid_called"
+                            and entry.get("ambulance_id") == event["ambulance_id"]
+                            and entry.get("patient_id") != event["patient_id"]):
+                        entry["patient_id"] = event["patient_id"]
+                        # Can't meet original optimal when patient changed — use actual as baseline
+                        entry["optimal_arrival_step"] = event["actual_arrival_step"]
+                        break
+
             self._episode_log.append({
                 "step": self._state.step_count,
                 "event": "mutual_aid_arrived",
@@ -678,13 +700,26 @@ class CodeRedEnvironment(Environment):
                 "reason": result["reason"],
             })
             return
+
+        # E4: Detect wasted OR prep — no patient en route to this hospital
+        patient_en_route = any(
+            p.status in ("dispatched", "transporting")
+            and getattr(p, "assigned_hospital", None) == action.hospital_id
+            for p in self._patients
+        )
+        prep_result = "success" if patient_en_route else "wasted"
+        if prep_result == "wasted":
+            self._alerts.append(
+                f"PrepareOR wasted: no patient en route to {action.hospital_id} for {action.procedure_type}"
+            )
+
         self._episode_log.append({
             "step": self._state.step_count,
             "event": "action_prepare_or",
             "hospital_id": action.hospital_id,
             "procedure_type": action.procedure_type,
             "or_index": result["or_index"],
-            "result": "success",
+            "result": prep_result,
         })
 
     def _do_page_specialist(self, action) -> None:
@@ -731,11 +766,28 @@ class CodeRedEnvironment(Environment):
         result = self._hospital_system.preempt_or(action.hospital_id, action.or_index)
         if not result["success"]:
             self._alerts.append(f"PreemptOR failed: {result['reason']}")
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_preempt_or",
+                "hospital_id": action.hospital_id,
+                "or_index": action.or_index,
+                "result": "failed",
+                "reason": result["reason"],
+            })
             return
         self._alerts.append(
             f"OR preempted at {action.hospital_id} OR {action.or_index}: "
             f"harm={result['harm']:.2f}, recovery={result['recovery_time']}min"
         )
+        self._episode_log.append({
+            "step": self._state.step_count,
+            "event": "action_preempt_or",
+            "hospital_id": action.hospital_id,
+            "or_index": action.or_index,
+            "result": "success",
+            "harm": result["harm"],
+            "recovery_time": result["recovery_time"],
+        })
 
     def _do_allocate_blood(self, action) -> None:
         from .models.actions import AllocateBlood
@@ -1146,7 +1198,11 @@ class CodeRedEnvironment(Environment):
                 tier=self._condition_to_tier(p.condition),
                 location_node=p.location_node,
                 time_since_onset=self._state.step_count - p.onset_step,
-                assigned_ambulance=None,  # ambulance assignment tracked by ambulance_manager, not here
+                assigned_ambulance=next(
+                    (amb_id for amb_id, amb in self._ambulance_manager.all().items()
+                     if getattr(amb, 'patient_id', None) == p.id),
+                    None
+                ),
                 assigned_hospital=p.assigned_hospital,
                 status=_map_patient_status(p.status),
                 vitals_score=p.vitals_score,
@@ -1460,6 +1516,7 @@ class CodeRedEnvironment(Environment):
             "is_secondary": False,
             "call_id": call_id,
             "target_time": PATIENT_TARGET_TIMES.get(true_condition, 60),
+            "force_spawn": True,  # indicates countdown-expired, not true natural arrival
         })
         outcome = {
             "call_id": call_id,

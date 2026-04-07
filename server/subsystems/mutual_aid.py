@@ -24,6 +24,7 @@ class MAPending:
     patient_id: Optional[str]
     arrival_step: int
     source_node: str
+    request_step: int = 0
 
 
 class MutualAidManager:
@@ -94,6 +95,7 @@ class MutualAidManager:
                 patient_id=None,
                 arrival_step=arrival_step,
                 source_node=MA_SOURCE_NODE,
+                request_step=step_count,
             )
             return ma_id
 
@@ -105,6 +107,7 @@ class MutualAidManager:
             patient_id=target_patient.id,
             arrival_step=arrival_step,
             source_node=MA_SOURCE_NODE,
+            request_step=step_count,
         )
         return ma_id
 
@@ -126,6 +129,8 @@ class MutualAidManager:
                 continue
 
             patient_id = pending.patient_id
+            original_patient_id = pending.patient_id
+            patient_changed = False
 
             # Auto-assign to highest-priority waiting patient if none assigned at request time
             if patient_id is None:
@@ -138,6 +143,7 @@ class MutualAidManager:
                     if candidates:
                         patient_id = candidates[0].id
                         pending.patient_id = patient_id
+                        patient_changed = True
                         break
 
             if patient_id:
@@ -161,6 +167,8 @@ class MutualAidManager:
                         "hospital_id": hosp_id,
                         "actual_arrival_step": step_count,
                         "had_patient": True,
+                        "patient_changed": patient_changed,
+                        "original_patient_id": original_patient_id,
                     })
                     # Trigger instant delivery: MA picks up and brings to hospital
                     arrival_callback(ma_id, patient_id)
@@ -171,6 +179,8 @@ class MutualAidManager:
                         "patient_id": patient_id,
                         "actual_arrival_step": step_count,
                         "had_patient": False,
+                        "patient_changed": patient_changed,
+                        "original_patient_id": original_patient_id,
                     })
             else:
                 arrivals.append({
@@ -178,6 +188,8 @@ class MutualAidManager:
                     "patient_id": None,
                     "actual_arrival_step": step_count,
                     "had_patient": False,
+                    "patient_changed": patient_changed,
+                    "original_patient_id": original_patient_id,
                 })
 
             del self._pending[ma_id]
