@@ -268,8 +268,13 @@ class CodeRedEnvironment(Environment):
                         if pending_entry and pending_entry.get("spawned"):
                             resolved_patient_id = pending_entry["spawned_patient_id"]
                         else:
-                            # Patient not spawned yet — can't pick up
-                            resolved_patient_id = None
+                            # Patient not spawned yet — spawn it now so ambulance has someone
+                            self._force_spawn_at_scene(call_id, amb_id)
+                            reloaded = self._pending_call_to_patient.get(call_id, {})
+                            if reloaded and reloaded.get("spawned"):
+                                resolved_patient_id = reloaded["spawned_patient_id"]
+                            else:
+                                resolved_patient_id = None
 
                     if resolved_patient_id:
                         patient = next((pt for pt in self._patients if pt.id == resolved_patient_id), None)
@@ -287,7 +292,7 @@ class CodeRedEnvironment(Environment):
                         entry = self._pending_call_to_patient.get(call_id, {})
                         if not entry.get("spawned"):
                             # Patient not spawned yet — spawn it now and link
-                            self._spawn_patient_from_call(call_id)
+                            self._force_spawn_at_scene(call_id, amb_id)
                             # Reload after spawn
                             reloaded = self._pending_call_to_patient.get(call_id, {})
                             if reloaded and reloaded.get("spawned"):
@@ -963,10 +968,10 @@ class CodeRedEnvironment(Environment):
                 "location_node": call["location_node"],
             }
 
-            # Set ambulance's target_node (don't set patient_id here — it would overwrite
-            # any pending linkage for a previous call on the same ambulance)
+            # Mark ambulance with CALL: placeholder so tick() starts scene countdown on arrival
             amb = self._ambulance_manager.get(action.ambulance_id)
             if amb:
+                amb.patient_id = f"CALL:{action.call_id}"
                 amb.target_node = call["location_node"]
 
             # And set ambulance on the call dict for lookup
@@ -1427,14 +1432,106 @@ class CodeRedEnvironment(Environment):
         self._pending_calls.append(call)
         self._pending_call_countdown[call_id] = 20
         self._phase2_has_activity = True
-        self._alerts.append(f"CALL: {category.value} call {call_id} at {location}")
+        self._alerts.append(f"CALL: {category.value if hasattr(category, 'value') else category} call {call_id} at {location}")
         self._episode_log.append({
             "step": self._state.step_count,
             "call_id": call_id,
             "event": "call_received",
-            "category": category.value,
+            "category": category.value if hasattr(category, 'value') else category,
             "location": location,
         })
+
+    def _force_spawn_at_scene(self, call_id: str, amb_id: str) -> None:
+        """Spawn a patient immediately when an ambulance arrives at scene and no patient exists.
+
+        Used for Phase 2: ambulance arrives with CALL:{call_id} but patient hasn't been spawned
+        yet (countdown expired before dispatch, or first arrival). Spawns the patient at the
+        call's location_node and links it to the ambulance.
+        """
+        from server.subsystems.constants import DISPATCH_CATEGORY_MAP
+        from server.subsystems.patient_manager import PatientManager
+
+        # Get call data: from _pending_calls dict if still there, else from pending linkage
+        call = next((c for c in self._pending_calls if c["call_id"] == call_id), None)
+        pending_entry = self._pending_call_to_patient.get(call_id, {})
+
+        if call:
+            location = call["location_node"]
+            category = call["category"]
+            call["assigned_ambulance_id"] = amb_id
+        elif pending_entry:
+            location = pending_entry.get("location_node", "RAJIV_CHOWK")
+            outcome = next((o for o in self._dispatch_outcomes_history if o["call_id"] == call_id), None)
+            category = outcome["category"] if outcome else list(DISPATCH_CATEGORY_MAP.keys())[0]
+        else:
+            return  # No data to spawn from
+
+        spawn_nodes = PatientManager._SPAWN_NODES
+        loc = location if location in [n["id"] for n in CITY_NODES] else self._rng.choice(spawn_nodes)
+
+        condition_choices = DISPATCH_CATEGORY_MAP[category]
+        conditions, probs = zip(*condition_choices)
+        true_condition = self._rng.choices(list(conditions), weights=list(probs))[0]
+        patient = self._patient_manager.spawn_secondary(
+            condition=true_condition, triggered_by=None, reason="forced_spawn",
+            onset_step=self._state.step_count, spawn_node=loc,
+        )
+        patient.dispatch_call_id = call_id
+        patient.observed_condition = true_condition
+        patient.assigned_ambulance = amb_id
+        self._phase2_has_activity = True
+
+        # Update ambulance
+        amb = self._ambulance_manager.get(amb_id)
+        if amb:
+            amb.patient_id = patient.id
+
+        # Update pending linkage
+        if not pending_entry.get("spawned"):
+            self._pending_call_to_patient[call_id] = {
+                "ambulance_id": amb_id,
+                "location_node": location or loc,
+                "spawned": True,
+                "spawned_patient_id": patient.id,
+            }
+
+        # Clean up countdown and call dict
+        self._pending_calls = [c for c in self._pending_calls if c["call_id"] != call_id]
+        self._pending_call_countdown.pop(call_id, None)
+        self._ambulance_pending_patient.pop(amb_id, None)
+
+        self._patients = self._patient_manager.patients
+        self._alerts.append(f"ON-SCENE: {category.value if hasattr(category, 'value') else category} call {call_id} force-spawned for {amb_id}")
+        self._episode_log.append({
+            "step": self._state.step_count,
+            "patient_id": patient.id,
+            "event": "patient_created",
+            "condition": true_condition,
+            "is_secondary": False,
+            "call_id": call_id,
+            "target_time": PATIENT_TARGET_TIMES.get(true_condition, 60),
+            "force_spawn": True,
+        })
+
+        # Record dispatch outcome for classification reward
+        outcome = {
+            "call_id": call_id,
+            "decision": "no_dispatch",
+            "category": category.value if hasattr(category, "value") else category,
+            "true_condition": true_condition,
+            "als_needed": true_condition in ("cardiac", "stroke", "trauma"),
+            "revealed_at_step": self._state.step_count,
+        }
+        found = False
+        for entry in self._dispatch_outcomes_history:
+            if entry["call_id"] == call_id and entry["true_condition"] is None:
+                entry["true_condition"] = true_condition
+                entry["als_needed"] = outcome["als_needed"]
+                entry["revealed_at_step"] = self._state.step_count
+                found = True
+                break
+        if not found:
+            self._dispatch_outcomes_history.append(outcome)
 
     def _spawn_patient_from_call(self, call_id: str) -> None:
         """Force-spawn a patient when a call's countdown expires or ambulance arrives."""
@@ -1507,7 +1604,7 @@ class CodeRedEnvironment(Environment):
 
         call["spawned_patient_id"] = patient.id
         self._patients = self._patient_manager.patients
-        self._alerts.append(f"ON-SCENE: {category.value} call {call_id} force-spawned")
+        self._alerts.append(f"ON-SCENE: {category.value if hasattr(category, 'value') else category} call {call_id} force-spawned")
         self._episode_log.append({
             "step": self._state.step_count,
             "patient_id": patient.id,
@@ -1521,7 +1618,7 @@ class CodeRedEnvironment(Environment):
         outcome = {
             "call_id": call_id,
             "decision": "no_dispatch",
-            "category": category.value,
+            "category": category.value if hasattr(category, 'value') else category,
             "true_condition": true_condition,
             "als_needed": true_condition in ("cardiac", "stroke", "trauma"),
             "revealed_at_step": self._state.step_count,
