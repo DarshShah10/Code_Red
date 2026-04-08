@@ -1,0 +1,18 @@
+[START] task=task1 env=codered_env model=gpt-5-nano
+[STEP] step=1 action=dispatch_ambulance(ambulance_id='AMB_1', patient_id='P1', target_node='MG_CHOWK') reward=0.20 done=false error=null
+[STEP] step=2 action=assign_hospital(patient_id='P1', hospital_id='HOSP_A') reward=0.20 done=false error=null
+[STEP] step=3 action=prepare_or(hospital_id='HOSP_A', procedure_type='cardiac') reward=0.20 done=false error=null
+[STEP] step=4 action=page_specialist(hospital_id='HOSP_A', specialist_type='cardiologist') reward=0.20 done=false error=null
+[STEP] step=5 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=6 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=7 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=8 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=9 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=10 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=11 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=12 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=13 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=14 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=15 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=16 action=maintain_plan() reward=0.20 done=false error=null
+[STEP] step=17 action=maintain_plan() reward=0.20 done=false error=null

@@ -4,12 +4,24 @@ import os
 from dataclasses import asdict
 from typing import Literal
 
-try:
-    from openenv.core.env_server.http_server import create_app
-except ImportError as e:
-    raise ImportError("openenv is required. Install with: uv sync") from e
-
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from server.codered_environment import CodeRedEnvironment
+from server.grader import grade_from_environment, RubricResult
+from server.models import CodeRedAction, CodeRedObservation
+from server.subsystems.constants import TASK_CONFIG
+
+# Create the base app with OpenEnv (disabled — gradio pulls in heavy deps that block startup on HF)
+_base_app = None
+
+# Create the main app
+app = FastAPI(title="CodeRedEnv API")
+
+# Include OpenEnv routes if available
+if _base_app is not None:
+    app.include_router(_base_app.router)
+
 
 # Root endpoint providing a quick overview of all available API routes
 @app.get("/")
@@ -26,28 +38,6 @@ async def root() -> dict:
             "/inference",
         ]
     }
-from pydantic import BaseModel
-
-from server.codered_environment import CodeRedEnvironment
-from server.grader import grade_from_environment, RubricResult
-from server.models import CodeRedAction, CodeRedObservation
-from server.subsystems.constants import TASK_CONFIG
-
-
-# Create the base app with OpenEnv
-_base_app = create_app(
-    CodeRedEnvironment,
-    CodeRedAction,
-    CodeRedObservation,
-    env_name="codered_env",
-    max_concurrent_envs=4,
-)
-
-# Create a new app that includes both OpenEnv routes and our custom endpoints
-app = FastAPI(title="CodeRedEnv API")
-
-# Include OpenEnv routes
-app.include_router(_base_app.router)
 
 
 # =============================================================================
@@ -252,7 +242,7 @@ async def run_inference(req: InferenceRequest):
 
 def main(host: str = "0.0.0.0", port: int = 8000):
     import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, workers=1)
 
 
 if __name__ == "__main__":
@@ -260,4 +250,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
-    main()  # main() call for openenv validate
+    main(port=args.port)  # main() call for openenv validate

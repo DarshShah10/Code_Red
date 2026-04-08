@@ -30,7 +30,8 @@ RUN uv pip install --system --no-cache \
     "httpx>=0.27.0" \
     "networkx>=3.0" \
     "python-dotenv>=1.0.0" \
-    "anthropic>=0.40.0"
+    "anthropic>=0.40.0" \
+    "python-multipart>=0.0.6"
 
 # ── Install this package in editable mode ─────────────────────────────────────
 RUN uv pip install --system --no-cache -e .
@@ -41,8 +42,7 @@ ENV HF_SPACE=1
 ENV PYTHONPATH=/app
 
 # ── Health check ───────────────────────────────────────────────────────────────
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# NOTE: removed HEALTHCHECK to avoid restart loops during heavy package loading
 
 EXPOSE 8000
 
