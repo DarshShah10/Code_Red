@@ -179,11 +179,8 @@ class StepRequest(BaseModel):
 
 @app.post("/step")
 async def step_env(req: StepRequest):
-    """
-    Apply action → return (obs, reward, done, info)
-    """
     try:
-        action = CodeRedAction(**req.action)
+        action = Action.model_validate(req.action)
 
         obs, reward, done, info = env.step(action)
 
@@ -193,6 +190,7 @@ async def step_env(req: StepRequest):
             "done": done,
             "info": info
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
