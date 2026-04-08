@@ -9,6 +9,7 @@ from server.codered_environment import CodeRedEnvironment
 from server.grader import grade_from_environment, RubricResult
 from server.models import CodeRedAction, CodeRedObservation
 from server.subsystems.constants import TASK_CONFIG
+from openenv.core.env_server.types import Action
 
 # Create the base app with OpenEnv (disabled — gradio pulls in heavy deps that block startup on HF)
 _base_app = None
@@ -211,24 +212,29 @@ async def get_state():
 
 
 # -----------------------------------------------------------------------------
-# SCHEMA (Action + Observation schema for agents)
+# SCHEMA
 # -----------------------------------------------------------------------------
 
 from server.models.actions import CodeRedAction
+from typing import get_args
 
 
 @app.get("/schema")
 async def get_schema():
     """
-    Return JSON schema for all valid actions (OpenEnv compatible).
+    Return schema for all action types.
     """
     try:
-        # Generate schema from Pydantic / OpenEnv models
-        schema = CodeRedAction.model_json_schema()
+        action_types = get_args(CodeRedAction)
+
+        schemas = {
+            action.__name__: action.model_json_schema()
+            for action in action_types
+        }
 
         return {
-            "action_schema": schema,
-            "note": "Use the 'type' field to select the action variant"
+            "actions": schemas,
+            "note": "Each action must include a 'type' field"
         }
 
     except Exception as e:
