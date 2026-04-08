@@ -178,10 +178,32 @@ class StepRequest(BaseModel):
     action: dict
 
 
+from server.models.actions import CodeRedAction
+from typing import get_args
+
+
 @app.post("/step")
 async def step_env(req: StepRequest):
     try:
-        action = Action.model_validate(req.action)
+        action_data = req.action
+
+        if "type" not in action_data:
+            raise ValueError("Missing 'type' field in action")
+
+        action_type = action_data["type"]
+
+        # 🔥 Build mapping from type → class
+        action_classes = get_args(CodeRedAction)
+        action_map = {
+            cls.model_fields["type"].default: cls
+            for cls in action_classes
+        }
+
+        if action_type not in action_map:
+            raise ValueError(f"Invalid action type: {action_type}")
+
+        # Instantiate correct action class
+        action = action_map[action_type](**action_data)
 
         obs, reward, done, info = env.step(action)
 
