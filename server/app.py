@@ -1,6 +1,8 @@
+"""FastAPI application for CodeRedEnv with API endpoints."""
+
 import os
 from dataclasses import asdict
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -10,6 +12,7 @@ from server.grader import grade_from_environment, RubricResult
 from server.models import CodeRedAction, CodeRedObservation
 from server.subsystems.constants import TASK_CONFIG
 from openenv.core.env_server.types import Action
+from typing import get_args
 
 # Create the base app with OpenEnv (disabled — gradio pulls in heavy deps that block startup on HF)
 _base_app = None
@@ -154,15 +157,19 @@ class ResetRequest(BaseModel):
 
 
 @app.post("/reset")
-async def reset_env(req: ResetRequest):
+async def reset_env(req: Optional[ResetRequest] = None):
     """
     Reset the environment and return initial observation.
     """
+    if req is None:
+        req = ResetRequest()
+        
     try:
         obs = env.reset(seed=req.seed, task_id=req.task_id)
 
         return {
-            "observation": obs,
+            "observation": obs.model_dump(),
+            "reward": 0.0,
             "done": False,
             "info": {
                 "task_id": req.task_id,
@@ -178,12 +185,15 @@ class StepRequest(BaseModel):
     action: dict
 
 
-from server.models.actions import CodeRedAction
-from typing import get_args
-
-
 @app.post("/step")
 async def step_env(req: StepRequest):
+    # Guard against 'NoneType' tick errors if /step is called before /reset
+    if getattr(env, "_ambulance_manager", None) is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Environment has not been initialized. Please call /reset first."
+        )
+
     try:
         action_data = req.action
 
@@ -205,15 +215,28 @@ async def step_env(req: StepRequest):
         # Instantiate correct action class
         action = action_map[action_type](**action_data)
 
-        obs, reward, done, info = env.step(action)
+        # Track previous reward to calculate step delta
+        prev_cum = env.state.cum_reward if getattr(env, "state", None) else 0.0
+
+        # Execute step (env.step only returns the observation)
+        obs = env.step(action)
+
+        # Calculate reward delta
+        current_cum = env.state.cum_reward if getattr(env, "state", None) else 0.0
+        step_reward = current_cum - prev_cum
+        
+        # Check if done
+        done = env._check_done()
 
         return {
-            "observation": obs,
-            "reward": reward,
+            "observation": obs.model_dump(),
+            "reward": step_reward,
             "done": done,
-            "info": info
+            "info": {}
         }
 
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -224,10 +247,16 @@ async def get_state():
     """
     Return current environment state WITHOUT stepping.
     """
+    if getattr(env, "state", None) is None:
+        raise HTTPException(
+            status_code=400, 
+            detail="Environment has not been initialized. Please call /reset first."
+        )
+        
     try:
         return {
-            "state": env.state,
-            "done": env._check_done() if hasattr(env, "_check_done") else False
+            "state": env.state.model_dump(),
+            "done": env._check_done()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -236,10 +265,6 @@ async def get_state():
 # -----------------------------------------------------------------------------
 # SCHEMA
 # -----------------------------------------------------------------------------
-
-from server.models.actions import CodeRedAction
-from typing import get_args
-
 
 @app.get("/schema")
 async def get_schema():
@@ -373,4 +398,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=7860)
     args = parser.parse_args()
-    main(port=args.port)  # main() call for openenv validate
+    main(port=args.port)
