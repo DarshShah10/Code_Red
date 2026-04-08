@@ -1,189 +1,220 @@
 # CodeRedEnv — Emergency Medical Coordination Simulation
 
-**A multi-subsystem OpenEnv-compatible RL benchmark** where an AI agent coordinates emergency
-medical response across Prakashnagar, India — a 12-node hub-and-spoke city with 3 hospital tiers
-and 5 ambulances.
+**A multi-subsystem OpenEnv-compatible RL benchmark** where an AI agent coordinates emergency medical response across Prakashnagar, India — a 12-node hub-and-spoke city with 3 hospital tiers and 5 ambulances.
 
-## Environment Description
+> **Live:** [huggingface.co/spaces/darshshah1012/coderedenv](https://huggingface.co/spaces/darshshah1012/coderedenv) |
+> **Grading:** Rubric-based (0.0–1.0), never escapes bounds
 
-CodeRedEnv simulates the critical first-30-minutes of a mass-casualty emergency response.
-The agent must prioritize, dispatch, triage, and resource-manage under time pressure and
-disruption events. It combines ambulance routing, hospital OR preparation, specialist paging,
-blood bank allocation, and mutual aid coordination into a single RL benchmark.
-
-**Motivation:** Emergency coordination is a real-world domain where sequential
-decision-making under uncertainty directly maps to RL formulation. Unlike toy benchmarks,
-CodeRedEnv has non-trivial state, cascading consequences, and resource contention — all
-real challenges faced by EMS dispatchers.
-
-## Action & Observation Spaces
-
-### Actions (14 total)
-
-| Action | Description | Phase |
-|--------|-------------|-------|
-| `dispatch_ambulance` | Dispatch ambulance to patient node (Phase 1) | 1 |
-| `dispatch_als` | Dispatch ALS ambulance to pending 911 call (Phase 2) | 2 |
-| `dispatch_bls` | Dispatch BLS ambulance to pending 911 call (Phase 2) | 2 |
-| `triage_call` | Classify a pending 911 call | 2 |
-| `assign_hospital` | Assign patient to destination hospital | 1+2 |
-| `prepare_or` | Begin OR preparation at hospital | 1+2 |
-| `page_specialist` | Page specialist at hospital | 1+2 |
-| `preempt_or` | Clear an OR for emergency use | 1+2 |
-| `allocate_blood` | Allocate blood units for patient | 1+2 |
-| `transfer_blood` | Transfer blood between hospitals | 1+2 |
-| `request_mutual_aid` | Request mutual aid ambulance | 1+2 |
-| `query_blood_type` | Query patient blood type (5-min delay) | 1+2 |
-| `query_or_status` | Query detailed OR status | 1+2 |
-| `maintain_plan` | No-op | 1+2 |
-
-### Observations
-
-Full state includes: active patients with vitals/location/status, ambulance positions/status/ETAs,
-hospital OR/specialist/ICU availability, pending 911 calls, blood bank stock, road network status,
-disruption alerts, and score previews.
+---
 
 ## Tasks
 
-| ID | Name | Patients | Disruptions | Mutual Aid | Difficulty |
+| ID | Name | Patients | Disruptions | Mutual Aid | Max Steps |
 |----|------|----------|-------------|-----------|-----------|
-| `task1` | Cardiac Emergency | 1 cardiac | None | No | Beginner |
-| `task2` | Multi-Patient Emergency | 2 (cardiac+stroke) | 1 event | 1 call | Intermediate |
-| `task3` | Crisis Surge | 5 patients | 2 events | 2 calls | Advanced |
-| `task4` | Call Queue — Triage | Queue (Phase 2) | 1 event | 1 call | Advanced |
-| `task5` | Cascade Crisis | Queue + cascades | 2 events | 2 calls | Expert |
+| `task1` | Cardiac Emergency — Single Patient | 1 cardiac | None | No | 30 |
+| `task2` | Multi-Patient Emergency | 2 (cardiac+stroke) | 1 road closure | 1 call | 45 |
+| `task3` | Crisis Surge — Mass Casualty | 5 patients | 2 events | 2 calls | 60 |
+| `task4` | Call Queue — Dispatch Triage | 911 call queue | 1 road closure | 1 call | 45 |
+| `task5` | Cascade Crisis — Full Phase 2 | Queue + cascades | 2 events | 2 calls | 60 |
+
+## Actions (14 total)
+
+**Phase 1** (`task1`–`task3`): direct patient dispatch
+`dispatch_ambulance` · `assign_hospital` · `prepare_or` · `page_specialist` · `preempt_or` · `allocate_blood` · `transfer_blood` · `request_mutual_aid` · `query_blood_type` · `query_or_status` · `maintain_plan`
+
+**Phase 2** (`task4`–`task5`): 911 call triage before dispatch
+`dispatch_als` · `dispatch_bls` · `triage_call` · (all above actions)
 
 ## Grading Rubric
 
+Score always in `[0.0, 1.0]` — never escapes bounds.
+
 ```
-final_score = 0.32 × time_score
-            + 0.16 × efficiency
-            + 0.16 × secondary_harm
-            + 0.16 × prep_ready
-            + 0.10 × vitals_score_avg
-            + 0.10 × cascade_score
-            − mutual_aid_penalty
+final_score = max(0.0, min(1.0, raw − deductions))
+raw = 0.30 × time_score
+    + 0.20 × efficiency
+    + 0.20 × secondary_harm
+    + 0.15 × prep_ready
+    + 0.15 × cascade_score
 ```
 
-- **Time score (32%):** How close to the target time each patient was treated
-- **Efficiency (16%):** Avoid wasted specialist pages, unused OR preps, premature blood draws
-- **Secondary harm (16%):** Whether secondary patients spawned by cascade events survived
-- **Prep ready (16%):** Whether hospitals had ORs and specialists ready when patients arrived
-- **Vitals score (10%):** Average vitals score of patients at time of treatment
-- **Cascade score (10%):** Secondary patient management, overcrowding prevention, news cycle handling
+- **time_score (30%):** Treatment time vs. clinical target per patient
+- **efficiency (20%):** Ratio of successful actions to wasted actions
+- **secondary_harm (20%):** Survival rate of cascade-spawned secondary patients
+- **prep_ready (15%):** OR + specialist readiness when patients arrive at hospital
+- **cascade_score (15%):** Secondary patient management, overcrowding, news cycles
 
-## Setup & Usage
+**Deductions (subtracted):** Mutual aid timing penalty, triage misclassification penalty, cross-validation penalty, ICU boarding penalty. Success threshold: **≥ 0.20**.
 
-### Local Development
+## Quick Start
+
+### Local (Python)
 
 ```bash
 cd codered_env
 uv sync
-uv run python -m pytest tests/ -v
-uv run python inference.py --task task1 --seed 0
+python inference.py --task task1 --max-steps 5 --provider anthropic
 ```
 
-### Docker (recommended for deployment)
+### Docker
 
 ```bash
-docker build -f Dockerfile -t codered-env .
-docker run -p 8000:8000 \
-  -e HF_TOKEN=hf_... \
-  -e API_BASE_URL=https://router.huggingface.co/v1 \
-  -e MODEL_NAME=Qwen/Qwen2.5-72B-Instruct \
-  codered-env
+docker build -t codered-env:latest .
+docker run -p 8000:8000 --env-file .env codered-env:latest
 ```
 
-### OpenEnv Validate
+Set API keys in `.env` (copy from `.env.sample`). Provider priority: **OpenAI → Anthropic → HF fallback**.
 
-```bash
-uv run openenv validate
-```
-
-## Inference
-
-### Environment Variables
-
-Before running inference, set these variables:
-
-```bash
-# Required
-export HF_TOKEN=hf_...                        # Your API key
-
-# Optional (defaults shown)
-export API_BASE_URL=https://router.huggingface.co/v1  # LLM endpoint
-export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct   # Model identifier
-export BENCHMARK=codered_env                   # Benchmark name for logs
-export MAX_STEPS=30                            # Max episode steps
-export SUCCESS_THRESHOLD=0.1                   # Score threshold for success
-```
-
-### Running
-
-```bash
-HF_TOKEN=... python inference.py --task task1 --seed 0 --max-steps 30
-HF_TOKEN=... python inference.py --task task2 --seed 0 --max-steps 45
-HF_TOKEN=... python inference.py --task task3 --seed 0 --max-steps 60
-HF_TOKEN=... python inference.py --task task4 --seed 0 --max-steps 45
-HF_TOKEN=... python inference.py --task task5 --seed 0 --max-steps 60
-```
-
-### STDOUT Format
-
-The inference script emits structured logs for automated evaluation:
-
-```
-[START] task=task1 env=codered_env model=Qwen/Qwen2.5-72B-Instruct
-[STEP]  step=1 action=dispatch_ambulance(...) reward=0.00 done=false error=null
-[STEP]  step=2 action=assign_hospital(...) reward=0.50 done=false error=null
-...
-[END]   success=true steps=8 rewards=0.00,0.00,0.50,0.50,0.50,0.50,0.50,0.50
-```
-
-## Baseline Scores
-
-Expected baseline (gpt-5-nano, seeds 0-2, no tuning):
-
-| Task | Mean Score | Notes |
-|------|-----------|-------|
-| task1 | ~0.3–0.6 | Simple single-patient dispatch |
-| task2 | ~0.2–0.5 | Multi-patient coordination |
-| task3 | ~0.1–0.3 | Mass casualty, high disruption |
-| task4 | ~0.2–0.4 | Dispatch triage learning |
-| task5 | ~0.1–0.2 | Full cascade management |
-
-## Deployment
-
-The environment deploys as a **containerized Hugging Face Space** tagged with `openenv`:
-
-```bash
-# Build and push
-docker build -f codered_env/Dockerfile -t ghcr.io/<user>/codered-env:latest .
-docker push ghcr.io/<user>/codered-env:latest
-
-# Or use the HF Space SDK
-huggingface_hub.upload_folder(...)
-```
-
-Set `HF_TOKEN` as a secret in your HF Space settings for gated model access.
-
-## API Endpoints
+### API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `GET` | `/tasks` | All 5 task definitions |
 | `POST` | `/reset` | Start new episode (seed, task_id) |
-| `POST` | `/step` | Execute action, return observation |
+| `POST` | `/step` | Execute action → observation |
 | `GET` | `/state` | Current environment state |
-| `GET` | `/tasks` | List all 5 task definitions |
-| `POST` | `/grader` | Run dummy agent and grade episode |
-| `POST` | `/baseline` | Run OpenAI baseline on seeds 0-2 |
+| `POST` | `/grade` | Run baseline agent, return rubric score |
+| `POST` | `/baseline` | Run agent on seeds [0,1,2], return mean score |
+| `POST` | `/inference` | **Streaming SSE** — run agent with real-time output |
 
-## Citation
+### Streaming Inference (`/inference`)
 
+```bash
+curl -N http://localhost:8000/inference \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"task_id":"task1","max_steps":5,"provider":"anthropic"}'
 ```
-@misc{coderedenv2026,
-  title={CodeRedEnv: Emergency Medical Coordination Simulation},
-  author={Darsh},
-  year={2026}
-}
+
+Output streams as Server-Sent Events:
+```
+data: [START] task=task1 env=codered_env model=claude-sonnet-4-6
+data: [STEP] step=1 action=dispatch_ambulance(...) reward=0.20 done=false
+data: [STEP] step=2 action=assign_hospital(...) reward=0.20 done=false
+...
+data: [END] success=true steps=5 rewards=0.20,0.20,0.20,0.20,0.20
+data: [GRADE] score=0.5500
+event: done
+```
+
+## Inference CLI
+
+```bash
+# Default: OpenAI (OpenRouter), 30 steps
+python inference.py --task task1
+
+# Force Anthropic, 5 steps
+python inference.py --task task1 --max-steps 5 --provider anthropic
+
+# HuggingFace fallback
+python inference.py --task task2 --provider hf_fallback
+
+# Multi-seed benchmark
+for seed in 0 1 2; do
+  python inference.py --task task1 --seed $seed --max-steps 30
+done
+```
+
+## Environment Variables
+
+```bash
+# Provider order: OPENAI > ANTHROPIC > HF_FALLBACK
+OPENAI_API_KEY=           # OpenRouter / Groq key (priority 1)
+OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_MODEL_NAME=qwen/qwen3.6-plus
+
+ANTHROPIC_API_KEY=        # OpusCode / Anthropic direct (priority 2)
+ANTHROPIC_API_BASE_URL=https://claude.opuscode.pro/api
+ANTHROPIC_MODEL_NAME=claude-sonnet-4-6
+
+HF_TOKEN=                 # HuggingFace (last resort fallback)
+
+BENCHMARK=codered_env
+TASK_NAME=task1
+MAX_STEPS=30
+SUCCESS_THRESHOLD=0.2
+LOCAL_IMAGE_NAME=codered-env:latest
+HF_SPACE_REPO=darshshah1012/coderedenv
+```
+
+## HuggingFace Space Deployment
+
+The Space at `darshshah1012/coderedenv` is set to **Docker hardware**. Push updated code to the Space repo — HF auto-rebuilds the Docker image from `Dockerfile`.
+
+```bash
+# Authenticate
+hf login
+
+# Push codered_env/ directory to the Space
+hf upload . --repo-id darshshah1012/coderedenv --repo-type space
+
+# Or clone, commit, push
+git clone https://huggingface.co/spaces/darshshah1012/coderedenv
+# copy updated code →
+git add . && git commit -m "update" && git push
+```
+
+Set secrets (API keys) via **HF Spaces UI → Settings → Repository secrets** — keys are never stored in code.
+
+## Action Space
+
+### Phase 1 — Direct Patient Dispatch (`task1`–`task3`)
+| Function | Description |
+|----------|-------------|
+| `dispatch_ambulance(ambulance_id, patient_id, target_node)` | Send ambulance to patient location |
+| `assign_hospital(patient_id, hospital_id)` | Assign destination hospital |
+| `prepare_or(hospital_id, procedure_type)` | Begin OR prep (cardiac/stroke/trauma/general) |
+| `page_specialist(hospital_id, specialist_type)` | Page specialist (cardiologist/neurologist/trauma_surgeon) |
+| `preempt_or(hospital_id, or_index)` | Clear OR room for emergency |
+| `allocate_blood(hospital_id, patient_id, blood_type, units)` | Allocate blood units |
+| `transfer_blood(from_hospital, to_hospital, blood_type, units)` | Transfer blood between hospitals |
+| `request_mutual_aid()` | Request mutual aid ambulance |
+| `query_blood_type(patient_id)` | Query patient blood type |
+| `query_or_status(hospital_id, or_index)` | Query OR room status |
+| `maintain_plan()` | No-op: continue without changes |
+
+### Phase 2 — Call Triage (`task4`–`task5`)
+| Function | Description |
+|----------|-------------|
+| `dispatch_als(ambulance_id, call_id)` | Dispatch ALS ambulance (AMB_1/AMB_2) to 911 call |
+| `dispatch_bls(ambulance_id, call_id)` | Dispatch BLS ambulance (AMB_3/4/5) to 911 call |
+| `triage_call(call_id, decision, ambulance_id?)` | Classify and dispatch 911 call |
+
+## Observation Space
+
+Key fields returned by the environment:
+- `step`: Current simulation step (int)
+- `patients[]`: Active patients with condition, status, vitals_score, blood_type, assigned_hospital, location_node
+- `ambulances[]`: Ambulance status (idle/en_route/to_hospital/at_hospital), equipment (als/bls), assigned_patient, eta_minutes
+- `hospitals[]`: Hospital capabilities, operating_rooms (idle/prep/surgery/occupied), specialists on-call
+- `pending_calls[]`: 911 calls with category, severity_est, time_waiting, location_node
+- `alerts[]`: System alerts (last 3 shown)
+- `time_score_preview`: Preview of time component score
+- `vitals_score_preview`: Preview of vitals component score
+- `patients_remaining`: Patients still needing treatment
+- `mutual_aid_remaining`: Mutual aid requests available
+- `overcrowding_modifier`: ED overcrowding factor (>1.0 means crowded)
+
+## Task Difficulty
+
+| Task | Difficulty | Description | Success Threshold |
+|------|-----------|-------------|-------------------|
+| `task1` | Easy | Single cardiac patient, no disruptions | Score ≥ 0.20 |
+| `task2` | Medium | 2 patients + 1 road closure | Score ≥ 0.20 |
+| `task3` | Hard | 5 patients + 2 disruptions + mutual aid | Score ≥ 0.20 |
+| `task4` | Medium | 911 call queue triage | Score ≥ 0.20 |
+| `task5` | Hard | Full cascade crisis | Score ≥ 0.20 |
+
+## Baseline Scores
+
+| Task | Model | Score (0.0–1.0) |
+|------|-------|-----------------|
+| task1 | qwen/qwen3.6-plus | ~0.35 |
+| task2 | qwen/qwen3.6-plus | ~0.25 |
+| task3 | qwen/qwen3.6-plus | ~0.20 |
+
+## OpenEnv Validation
+
+```bash
+uv run openenv validate
 ```
