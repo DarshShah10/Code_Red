@@ -1,5 +1,3 @@
-"""FastAPI application for CodeRedEnv with API endpoints."""
-
 import os
 from dataclasses import asdict
 from typing import Literal
@@ -23,6 +21,13 @@ if _base_app is not None:
     app.include_router(_base_app.router)
 
 
+# =============================================================================
+# ENVIRONMENT STATE (GLOBAL INSTANCE)
+# =============================================================================
+
+env = CodeRedEnvironment()
+
+
 # Root endpoint providing a quick overview of all available API routes
 @app.get("/")
 async def root() -> dict:
@@ -34,6 +39,7 @@ async def root() -> dict:
             "/tasks",
             "/reset",
             "/step",
+            "/state",
             "/grade",
             "/inference",
         ]
@@ -127,7 +133,7 @@ async def info():
         "name": "CodeRedEnv",
         "description": "Emergency Medical Coordination Environment for OpenEnv",
         "version": "0.1.0",
-        "endpoints": ["/health", "/reset", "/step", "/grade", "/info"],
+        "endpoints": ["/health", "/reset", "/step", "/state", "/grade", "/info"],
         "tasks": ["task1", "task2", "task3", "task4", "task5"],
     }
 
@@ -140,6 +146,73 @@ async def get_tasks() -> dict:
     }
 
 
+# ---------------- RESET ----------------
+class ResetRequest(BaseModel):
+    task_id: Literal["task1", "task2", "task3", "task4", "task5"] = "task1"
+    seed: int = 0
+
+
+@app.post("/reset")
+async def reset_env(req: ResetRequest):
+    """
+    Reset the environment and return initial observation.
+    """
+    try:
+        obs = env.reset(seed=req.seed, task_id=req.task_id)
+
+        return {
+            "observation": obs,
+            "done": False,
+            "info": {
+                "task_id": req.task_id,
+                "seed": req.seed
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------- STEP ----------------
+class StepRequest(BaseModel):
+    action: dict
+
+
+@app.post("/step")
+async def step_env(req: StepRequest):
+    """
+    Apply action → return (obs, reward, done, info)
+    """
+    try:
+        action = CodeRedAction(**req.action)
+
+        obs, reward, done, info = env.step(action)
+
+        return {
+            "observation": obs,
+            "reward": reward,
+            "done": done,
+            "info": info
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------- STATE ----------------
+@app.get("/state")
+async def get_state():
+    """
+    Return current environment state WITHOUT stepping.
+    """
+    try:
+        return {
+            "state": env.state,
+            "done": env._check_done() if hasattr(env, "_check_done") else False
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------- GRADING ----------------
 class GraderRequest(BaseModel):
     task_id: Literal["task1", "task2", "task3", "task4", "task5"]
     seed: int
@@ -148,19 +221,19 @@ class GraderRequest(BaseModel):
 @app.post("/grade")
 async def grade_task(req: GraderRequest) -> dict:
     """Run a dummy agent episode and return the rubric score."""
-    env = CodeRedEnvironment()
-    env.reset(seed=req.seed, task_id=req.task_id)
+    test_env = CodeRedEnvironment()
+    test_env.reset(seed=req.seed, task_id=req.task_id)
 
     # Run a simple baseline agent
     from server.models.actions import MaintainPlan
     done = False
     steps = 0
-    while not done and steps < env.state.max_steps:
-        env.step(MaintainPlan())
-        done = env._check_done()
+    while not done and steps < test_env.state.max_steps:
+        test_env.step(MaintainPlan())
+        done = test_env._check_done()
         steps += 1
 
-    result = grade_from_environment(env)
+    result = grade_from_environment(test_env)
     return asdict(result)
 
 
