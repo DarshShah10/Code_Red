@@ -115,18 +115,14 @@ async def health_check() -> dict:
 
 
 @app.get("/info")
-async def get_info() -> dict:
-    """Return environment metadata and endpoint summary."""
+async def info():
+    """Return application metadata."""
     return {
         "name": "CodeRedEnv",
-        "description": "Emergency Medical Coordination Environment (OpenEnv)",
-        "endpoints": {
-            "health": "GET /health",
-            "tasks": "GET /tasks",
-            "info": "GET /info",
-            "grade": "POST /grade",
-            "inference": "POST /inference",
-        },
+        "description": "Emergency Medical Coordination Environment for OpenEnv",
+        "version": "0.1.0",
+        "endpoints": ["/health", "/reset", "/step", "/grade", "/info"],
+        "tasks": ["task1", "task2", "task3", "task4", "task5"],
     }
 
 

@@ -479,6 +479,7 @@ def _run_local_episode(
     env = CodeRedEnvironment()
     obs = env.reset(seed=seed, task_id=task_id)
     rewards: list[float] = []
+    prev_cum_reward = 0.0
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     for step in range(1, max_steps + 1):
@@ -495,7 +496,9 @@ def _run_local_episode(
 
         obs = env.step(action_obj)
 
-        reward = env.state.cum_reward if hasattr(env.state, "cum_reward") else 0.0
+        current_cum = env.state.cum_reward if hasattr(env.state, "cum_reward") else 0.0
+        reward = current_cum - prev_cum_reward
+        prev_cum_reward = current_cum
         rewards.append(round(reward, 2))
         done = env._check_done()
 
