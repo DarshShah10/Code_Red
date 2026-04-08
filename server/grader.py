@@ -81,272 +81,140 @@ def grade_cascade_score(episode_log: list[dict]) -> float:
     return max(0.0, min(1.0, cascade_score))
 
 
-def grade_episode(episode_log: list[dict]) -> RubricResult:
-    """
-    Grade a CodeRedEnv episode using the 4-axis rubric.
+def grade_episode(episode_log: list[dict], dispatch_outcomes: list[dict] = None) -> RubricResult:
+    """Hybrid Grader: Deep subsystems evaluation with airtight mathematical guards."""
 
-    episode_log: list of event dicts with keys like:
-        - event: "patient_created", "patient_deceased", "treatment_complete"
-        - patient_id, condition, is_secondary, reason
-        - effective_time, target_time (for treatment_complete)
-        - action_prepare_or, action_page_specialist, action_allocate_blood with result: "wasted"
-        - mutual_aid_called, mutual_aid_arrived with optimal/actual arrival steps
-    """
-    # =========================================================================
-    # TIME SCORE (40% weight)
-    # =========================================================================
-    patient_times = {}
-    for entry in episode_log:
-        if entry.get("event") == "treatment_complete":
-            pid = entry.get("patient_id")
-            patient_times[pid] = {
-                "effective_time": entry.get("effective_time", 0),
-                "target_time": entry.get("target_time", 90),
-                "treated": True,
-            }
-        elif entry.get("event") == "patient_deceased":
-            pid = entry.get("patient_id")
-            patient_times[pid] = {
-                "effective_time": 0,
-                "target_time": entry.get("target_time", 90),
-                "treated": False,
-            }
-        elif entry.get("event") == "patient_created":
-            pid = entry.get("patient_id")
-            if pid not in patient_times:
-                patient_times[pid] = {"treated": False}
-
-    if patient_times:
-        scores = []
-        for pid, data in patient_times.items():
-            if data["treated"]:
-                eff = data["effective_time"]
-                tgt = max(data["target_time"], 1)
-                score = max(0.0, min(1.0, 1.0 - (eff - tgt) / tgt))
-                scores.append(score)
-            else:
-                scores.append(0.0)
-        time_score = sum(scores) / len(scores) if scores else 1.0
-    else:
-        # Empty episode: no patients processed — agent gets 0.0, not 1.0
-        time_score = 0.0
+    # Check baseline activity
+    patients_created = sum(1 for e in episode_log if e.get("event") == "patient_created")
+    if patients_created == 0:
+        return RubricResult(0.0, 1.0, 1.0, 1.0, 0.0, 0.0, {"error": "No patients processed"}, 1.0, 1.0)
 
     # =========================================================================
-    # VITALS SCORE AVERAGE (informational — not yet in final_score)
+    # 1. SURVIVAL & SECONDARY HARM
+    # We explicitly forgive "hospital_mortality" (RNG) deaths. We only punish preventable deaths.
     # =========================================================================
-    # Capture vitals at treatment from treatment_complete events
-    vitals_scores = []
-    for entry in episode_log:
-        if entry.get("event") == "treatment_complete":
-            vitals_scores.append(entry.get("vitals_at_treatment", 1.0))
-    vitals_score_avg = sum(vitals_scores) / len(vitals_scores) if vitals_scores else 1.0
+    preventable_deaths = sum(1 for e in episode_log if e.get("event") == "patient_deceased" and e.get("reason") != "hospital_mortality")
+    survival_rate = 1.0 - (preventable_deaths / patients_created)
+
+    # THE ABSOLUTE GUARD: If everyone dies preventably, the run is a 0. No partial credit.
+    if survival_rate == 0.0:
+        return RubricResult(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, {"error": "100% preventable mortality rate"}, 0.0, 0.0)
+
+    secondary_deaths = sum(1 for e in episode_log if e.get("event") == "patient_deceased" and e.get("reason") == "secondary")
+    secondary_patients = sum(1 for e in episode_log if e.get("event") == "patient_created" and e.get("is_secondary"))
+    secondary_harm = 1.0 - (secondary_deaths / secondary_patients) if secondary_patients > 0 else 1.0
 
     # =========================================================================
-    # EFFICIENCY (20% weight)
+    # 2. TIME SCORE
     # =========================================================================
-    unused_specialist = sum(
-        1 for e in episode_log
-        if e.get("event") == "action_page_specialist" and e.get("result") == "wasted"
-    )
-    wasted_or_preps = sum(
-        1 for e in episode_log
-        if e.get("event") == "action_prepare_or" and e.get("result") == "wasted"
-    )
-    premature_blood_emerg = sum(
-        1 for e in episode_log
-        if e.get("event") == "action_allocate_blood" and e.get("result") == "wasted"
-    )
-    total_penalty = -0.1 * unused_specialist + -0.15 * wasted_or_preps + -0.1 * premature_blood_emerg
-    efficiency = max(0.0, min(1.0, 1.0 + total_penalty))
+    time_scores = []
+    for e in episode_log:
+        if e.get("event") == "treatment_complete":
+            tgt = max(1, e.get("target_time", 90))
+            eff = e.get("effective_time", 0)
+            time_scores.append(max(0.0, min(1.0, 1.0 - (eff - tgt) / tgt)))
+        elif e.get("event") == "patient_deceased" and e.get("reason") != "hospital_mortality":
+            time_scores.append(0.0)  # Preventable death = 0 time score
+
+    time_score = sum(time_scores) / len(time_scores) if time_scores else 0.0
 
     # =========================================================================
-    # SECONDARY HARM (20% weight)
+    # 3. EFFICIENCY (Uncheatable Ratio)
+    # Instead of `-0.1` flat penalties, we use a ratio. Spamming 100 bad actions destroys this score.
     # =========================================================================
-    secondary_deaths = sum(
-        1 for e in episode_log
-        if e.get("event") == "patient_deceased" and e.get("reason") == "secondary"
-    )
-    secondary_patients = sum(
-        1 for e in episode_log
-        if e.get("event") == "patient_created" and e.get("is_secondary", False)
-    )
-    if secondary_patients > 0:
-        secondary_harm = 1.0 - (secondary_deaths / secondary_patients)
-    else:
-        secondary_harm = 1.0
+    wasted_actions = sum(1 for e in episode_log if e.get("result") == "wasted")
+    good_actions = sum(1 for e in episode_log if e.get("result") == "success")
+    efficiency = good_actions / (good_actions + wasted_actions) if (good_actions + wasted_actions) > 0 else 1.0
 
     # =========================================================================
-    # PREP READY (20% weight)
+    # 4. PREP READY & PREEMPTION HARM
     # =========================================================================
     arrival_scores = []
-    for entry in episode_log:
-        if entry.get("event") == "patient_arrived_hospital":
-            or_ready = entry.get("or_ready", False)
-            specialist_available = entry.get("specialist_available", False)
-            if or_ready and specialist_available:
+    for e in episode_log:
+        if e.get("event") == "patient_arrived_hospital":
+            if e.get("or_ready") and e.get("specialist_available"):
                 arrival_scores.append(1.0)
-            elif or_ready or specialist_available:
+            elif e.get("or_ready") or e.get("specialist_available"):
                 arrival_scores.append(0.5)
             else:
                 arrival_scores.append(0.0)
-    prep_ready = sum(arrival_scores) / len(arrival_scores) if arrival_scores else 1.0
 
-    # Preemption penalty: each preempted surgery reduces prep_ready
-    preempted_surgeries = sum(
-        1 for e in episode_log
-        if e.get("event") == "surgery_aborted" and e.get("reason") == "or_preempted"
-    )
-    preemptive_actions = sum(
-        1 for e in episode_log
-        if e.get("event") == "action_preempt_or"
-    )
-    prep_ready = max(0.0, prep_ready - 0.1 * preempted_surgeries)
+    # Fix the dead-on-street loophole
+    if not arrival_scores:
+        prep_ready = 0.0
+    else:
+        prep_ready = sum(arrival_scores) / len(arrival_scores)
+
+    preempted_surgeries = sum(1 for e in episode_log if e.get("event") == "surgery_aborted")
+    prep_ready = max(0.0, prep_ready - (0.1 * preempted_surgeries))
 
     # =========================================================================
-    # MUTUAL AID PENALTY
-    # =========================================================================
-    ma_calls = [
-        e for e in episode_log
-        if e.get("event") == "mutual_aid_called"
-    ]
-    penalties = []
-    for call in ma_calls:
-        optimal = call.get("optimal_arrival_step", 0)
-        arrival_events = [
-            e for e in episode_log
-            if e.get("event") == "mutual_aid_arrived"
-            and e.get("patient_id") == call.get("patient_id")
-        ]
-        if arrival_events:
-            actual = arrival_events[0].get("actual_arrival_step", optimal)
-        else:
-            actual = optimal + 10  # assume late if not arrived
-        if actual < optimal:
-            penalties.append(0.1 * (optimal - actual))
-        elif actual > optimal:
-            penalties.append(0.2 * (actual - optimal))
-    num_calls = len(ma_calls)
-    mutual_aid_penalty = sum(penalties) / num_calls if num_calls > 0 else 0.0
-
-    # =========================================================================
-    # CASCADE SCORE (Phase 2: secondary patient management)
+    # 5. CASCADE SCORE
     # =========================================================================
     cascade_score = grade_cascade_score(episode_log)
 
     # =========================================================================
-    # FINAL SCORE
+    # 6. VITALS AVERAGE (Informational)
+    # =========================================================================
+    vitals_scores = [e.get("vitals_at_treatment", 1.0) for e in episode_log if e.get("event") == "treatment_complete"]
+    vitals_score_avg = sum(vitals_scores) / len(vitals_scores) if vitals_scores else 0.0
+
+    # =========================================================================
+    # DEDUCTIONS (Mutual Aid & Triage - Subtracted directly from Final Score)
+    # =========================================================================
+    # Mutual Aid: sum penalties (stacking), not averaged!
+    ma_penalties = 0.0
+    for call in [e for e in episode_log if e.get("event") == "mutual_aid_called"]:
+        optimal = call.get("optimal_arrival_step", 0)
+        actual_event = next((e for e in episode_log if e.get("event") == "mutual_aid_arrived" and e.get("patient_id") == call.get("patient_id")), None)
+        actual = actual_event.get("actual_arrival_step", optimal + 10) if actual_event else optimal + 10
+        if actual < optimal:
+            ma_penalties += 0.1 * (optimal - actual)
+        elif actual > optimal:
+            ma_penalties += 0.2 * (actual - optimal)
+
+    # Triage Accuracy (Phase 2)
+    triage_penalty = 0.0
+    if dispatch_outcomes:
+        for o in dispatch_outcomes:
+            if o["true_condition"] is not None:
+                if o["decision"] == "als" and not o["als_needed"]:
+                    triage_penalty += 0.10  # Hoarding ALS
+                elif o["decision"] != "als" and o["als_needed"]:
+                    triage_penalty += 0.20  # Sent BLS to dying patient
+
+    total_deductions = ma_penalties + triage_penalty
+
+    # =========================================================================
+    # FINAL SCORE CALCULATION
     # =========================================================================
     raw = (
-        0.32 * time_score
-        + 0.16 * efficiency
-        + 0.16 * secondary_harm
-        + 0.16 * prep_ready
-        + 0.10 * vitals_score_avg
-        + 0.10 * cascade_score
+        0.30 * time_score
+        + 0.20 * efficiency
+        + 0.20 * secondary_harm
+        + 0.15 * prep_ready
+        + 0.15 * cascade_score
     )
-    final_score = max(0.0, min(1.0, raw - mutual_aid_penalty))
-
-    # =========================================================================
-    # ANTI-EXPLOIT: empty/no-action episode guard
-    # =========================================================================
-    patient_events = {
-        e["patient_id"]
-        for e in episode_log
-        if e.get("event") in ("patient_created", "treatment_complete", "patient_deceased")
-    }
-    if len(patient_events) == 0:
-        # No patients processed — agent did nothing, gets 0.0
-        final_score = 0.0
-        breakdown = {
-            "time_score": 0.0,
-            "efficiency": 1.0,
-            "secondary_harm": 1.0,
-            "prep_ready": 1.0,
-            "vitals_score_avg": 1.0,
-            "cascade_score": 1.0,
-            "mutual_aid_penalty": 0.0,
-            "anti_exploit": "no_patients_processed",
-        }
-        return RubricResult(
-            time_score=0.0,
-            efficiency=1.0,
-            secondary_harm=1.0,
-            prep_ready=1.0,
-            mutual_aid_penalty=0.0,
-            final_score=0.0,
-            breakdown=breakdown,
-            vitals_score_avg=1.0,
-            cascade_score=1.0,
-        )
-
-    # =========================================================================
-    # ANTI-EXPLOIT: E2 Idle strategy detection
-    # =========================================================================
-    dispatches = [e for e in episode_log if e.get("event") in ("dispatch", "action_dispatch")]
-    treatments = [e for e in episode_log if e.get("event") == "treatment_complete"]
-    if not dispatches and not treatments and len(patient_times) > 0:
-        all_deceased = all(not data.get("treated", False) for data in patient_times.values())
-        if all_deceased:
-            # Complete inaction — all patients died with no agent action
-            time_score = max(0.0, time_score - 0.3)
-            breakdown_extra = {"anti_exploit": "complete_inaction"}
-        else:
-            breakdown_extra = {}
-    else:
-        breakdown_extra = {}
-
-    # E1: Cascade farming penalty — delayed primary treatment + cascade spawns
-    cascade_patients = [e for e in episode_log if e.get("event") == "secondary_patient_spawned"]
-    primary_patients = [e for e in episode_log if e.get("event") == "patient_created" and not e.get("is_secondary")]
-    if cascade_patients and primary_patients:
-        primary_pid = primary_patients[0].get("patient_id")
-        for entry in episode_log:
-            if (entry.get("event") == "treatment_complete"
-                    and entry.get("patient_id") == primary_pid):
-                eff = entry.get("effective_time", 0)
-                tgt = entry.get("target_time", 90)
-                if eff > tgt * 1.5:  # 50% over target
-                    farming_penalty = min(0.2, 0.1 * len(cascade_patients))
-                    time_score = max(0.0, time_score - farming_penalty)
-                    breakdown_extra["cascade_farming_penalty"] = round(farming_penalty, 4)
-                break
+    final_score = max(0.0, min(1.0, raw - total_deductions))
 
     breakdown = {
-        "time_score": time_score,
-        "efficiency": efficiency,
-        "secondary_harm": secondary_harm,
-        "prep_ready": prep_ready,
-        "vitals_score_avg": vitals_score_avg,
-        "cascade_score": cascade_score,
-        "mutual_aid_penalty": mutual_aid_penalty,
-        "unused_specialist_pages": unused_specialist,
-        "wasted_or_preps": wasted_or_preps,
-        "premature_blood_emerg": premature_blood_emerg,
-        "secondary_deaths": secondary_deaths,
-        "secondary_patients": secondary_patients,
-        "mutual_aid_calls": num_calls,
-        "preemptive_actions": preemptive_actions,
-        "preempted_surgeries": preempted_surgeries,
+        "time_score": round(time_score, 4),
+        "efficiency": round(efficiency, 4),
+        "secondary_harm": round(secondary_harm, 4),
+        "prep_ready": round(prep_ready, 4),
+        "cascade_score": round(cascade_score, 4),
+        "preventable_deaths": preventable_deaths,
+        "wasted_actions": wasted_actions,
+        "triage_penalty": round(triage_penalty, 4),
+        "mutual_aid_penalty": round(ma_penalties, 4)
     }
-    breakdown.update(breakdown_extra)
-
-    # Recompute final score with adjusted time_score
-    raw = (
-        0.32 * time_score
-        + 0.16 * efficiency
-        + 0.16 * secondary_harm
-        + 0.16 * prep_ready
-        + 0.10 * vitals_score_avg
-        + 0.10 * cascade_score
-    )
-    final_score = max(0.0, min(1.0, raw - mutual_aid_penalty))
 
     return RubricResult(
         time_score=round(time_score, 4),
         efficiency=round(efficiency, 4),
         secondary_harm=round(secondary_harm, 4),
         prep_ready=round(prep_ready, 4),
-        mutual_aid_penalty=round(mutual_aid_penalty, 4),
+        mutual_aid_penalty=round(ma_penalties, 4),
         final_score=round(final_score, 4),
         breakdown=breakdown,
         vitals_score_avg=round(vitals_score_avg, 4),
@@ -355,70 +223,25 @@ def grade_episode(episode_log: list[dict]) -> RubricResult:
 
 
 def grade_from_environment(env) -> RubricResult:
-    """
-    Grade from a CodeRedEnvironment instance with cross-validation.
+    """Wrapper that passes required state and handles cross-validation."""
+    result = grade_episode(env.get_episode_log(), env._dispatch_outcomes_history)
 
-    Compares the episode log against the environment's patient manager to detect
-    silent mismatches between treatment_complete events and patient outcomes.
-    Mismatches are penalised proportionally and exposed in the breakdown.
-    """
-    log = env.get_episode_log()
+    if result.final_score == 0.0:
+        return result  # Don't bother cross-validating a total failure
 
-    # =========================================================================
-    # CROSS-VALIDATION: treatment_complete events vs patient manager outcomes
-    # =========================================================================
+    # Cross-validation from your original (Ensures logs match patient_manager)
     patients = env._patient_manager.get_all()
-
-    logged_treated = {
-        e["patient_id"]
-        for e in log
-        if e.get("event") == "treatment_complete"
-    }
+    logged_treated = {e["patient_id"] for e in env.get_episode_log() if e.get("event") == "treatment_complete"}
     patients_saved = {p.id for p in patients if p.outcome == "saved"}
     patients_deceased = {p.id for p in patients if p.outcome == "deceased"}
 
-    # 1. Patients marked as saved in patient manager but no treatment_complete log
-    treated_missing_log = patients_saved - logged_treated
+    mismatches = len(patients_saved - logged_treated) + len(logged_treated & patients_deceased) + len(patients_saved & patients_deceased)
 
-    # 2. Patients with treatment_complete event but outcome is "deceased"
-    treated_but_deceased = logged_treated & patients_deceased
+    cv_penalty = min(1.0, 0.2 * mismatches)
+    icu_penalty = min(1.0, 0.05 * sum(1 for e in env.get_episode_log() if e.get("event") == "icu_boarding"))
 
-    # 3. Patients marked as saved but also marked deceased in patient manager
-    #    (this is an internal inconsistency in patient_manager)
-    saved_but_deceased = patients_saved & patients_deceased
-
-    num_mismatches = (
-        len(treated_missing_log)
-        + len(treated_but_deceased)
-        + len(saved_but_deceased)
-    )
-
-    # Expose in breakdown
-    cross_validation_penalty = min(1.0, 0.2 * num_mismatches)
-
-    # =========================================================================
-    # ICU BOARDING PENALTY (Task 13)
-    # =========================================================================
-    boarding_events = [
-        e for e in log
-        if e.get("event") == "icu_boarding"
-    ]
-    num_boarding = len(boarding_events)
-    icu_boarding_penalty = min(1.0, 0.05 * num_boarding)
-
-    # Grade from the log first
-    result = grade_episode(log)
-
-    # Apply cross-validation penalty
-    result.final_score = max(0.0, result.final_score - cross_validation_penalty)
-    result.breakdown["cross_validation_mismatches"] = num_mismatches
-    result.breakdown["cross_validation_penalty"] = round(cross_validation_penalty, 4)
-    result.breakdown["treated_missing_log"] = sorted(treated_missing_log)
-    result.breakdown["treated_but_deceased"] = sorted(treated_but_deceased)
-
-    # Apply ICU boarding penalty
-    result.final_score = max(0.0, result.final_score - icu_boarding_penalty)
-    result.breakdown["icu_boarding_events"] = num_boarding
-    result.breakdown["icu_boarding_penalty"] = round(icu_boarding_penalty, 4)
+    result.final_score = round(max(0.0, min(1.0, result.final_score - cv_penalty - icu_penalty)), 4)
+    result.breakdown["cv_penalty"] = cv_penalty
+    result.breakdown["icu_penalty"] = icu_penalty
 
     return result

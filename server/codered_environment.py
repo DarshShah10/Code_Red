@@ -1093,63 +1093,65 @@ class CodeRedEnvironment(Environment):
         if self._state.all_patients_terminal:
             return 0.0
 
+        # 1. Vitals delta shaping
         for pid, prev in self._prev_vitals.items():
             curr_patient = self._patient_manager.patients_dict.get(pid)
-            if curr_patient is None:
-                continue
-            # Vitals delta shaping
-            reward += (curr_patient.vitals_score - prev) * VITALS_DELTA_WEIGHT
+            if curr_patient:
+                reward += (curr_patient.vitals_score - prev) * VITALS_DELTA_WEIGHT
 
-        # Milestone bonuses/penalties
+        # 2. Milestone bonuses/penalties
         for pid, prev_status in self._prev_patient_status.items():
             curr_patient = self._patient_manager.patients_dict.get(pid)
-            if curr_patient is None:
-                continue
-            curr_status = curr_patient.status
-            if prev_status == "waiting" and curr_status == "dispatched":
-                reward += MILESTONE_REWARDS["dispatched"]
-            if prev_status == "dispatched" and curr_status == "in_treatment":
-                reward += MILESTONE_REWARDS["in_treatment"]
-            if prev_status != "treated" and curr_status == "treated":
-                reward += MILESTONE_REWARDS["treated"]
-            if prev_status != "deceased" and curr_status == "deceased":
-                reward += MILESTONE_REWARDS["deceased"]
+            if curr_patient:
+                curr_status = curr_patient.status
+                if prev_status == "waiting" and curr_status == "dispatched":
+                    reward += MILESTONE_REWARDS["dispatched"]
+                if prev_status == "dispatched" and curr_status == "in_treatment":
+                    reward += MILESTONE_REWARDS["in_treatment"]
+                if prev_status != "treated" and curr_status == "treated":
+                    reward += MILESTONE_REWARDS["treated"]
+                if prev_status != "deceased" and curr_status == "deceased":
+                    reward += MILESTONE_REWARDS["deceased"]
 
-        # Phase 2: Dispatch classification reward (for task5 with cascade_enabled)
+        # 3. Action Spam & Wasted Action Penalty (Hybrid fix)
+        for alert in self._alerts:
+            if "Action spam" in alert:
+                reward -= 0.10
+        current_logs = [log for log in self._episode_log if log.get("step") == self._state.step_count]
+        for log in current_logs:
+            if log.get("result") == "wasted":
+                reward -= 0.02
+
+        # 4. Phase 2: Dispatch classification (Fixed the infinite-loop exploit)
         cascade_enabled = TASK_CONFIG.get(self._state.task_id, {}).get("cascade_enabled", False)
         if cascade_enabled:
-            for outcome in self._dispatch_outcomes_history[-10:]:
-                if outcome["true_condition"] is None:
-                    continue
-                als_needed = outcome["als_needed"]
-                als_dispatched = outcome["decision"] == "als"
-                if als_needed and als_dispatched:
-                    reward += 0.005
-                elif not als_needed and not als_dispatched:
-                    reward += 0.002
-                elif als_needed and not als_dispatched:
-                    reward -= 0.020
-                elif not als_needed and als_dispatched:
-                    reward -= 0.005
-                if outcome["decision"] in ("self_transport", "callback") and als_needed:
-                    reward -= 0.030
+            for outcome in self._dispatch_outcomes_history:
+                if outcome.get("scored") or outcome["true_condition"] is None:
+                    continue  # Skip if already rewarded or unresolved
 
-        # Bootstrap reward for new patients (secondary/cascade spawns mid-episode)
-        # Without this, new patients have no prev_vitals entry → zero delta → agent
-        # cannot learn to respond to secondary patients via reward shaping.
+                als_needed = outcome["als_needed"]
+                als_dispatched = (outcome["decision"] == "als")
+
+                if als_needed and als_dispatched:
+                    reward += 0.05
+                elif not als_needed and not als_dispatched:
+                    reward += 0.02
+                elif als_needed and not als_dispatched:
+                    reward -= 0.10
+                elif not als_needed and als_dispatched:
+                    reward -= 0.05
+
+                outcome["scored"] = True  # Mark as scored!
+
+        # 5. Bootstrap new patients
         for patient in self._patient_manager.patients:
             if patient.id not in self._prev_vitals:
                 self._prev_vitals[patient.id] = patient.vitals_score
                 self._prev_patient_status[patient.id] = patient.status
-                reward += MILESTONE_REWARDS["dispatched"]  # "you found a new patient" signal
+                reward += MILESTONE_REWARDS["dispatched"]
 
-        # Snapshot for next step
-        self._prev_vitals = {
-            p.id: p.vitals_score for p in self._patient_manager.patients
-        }
-        self._prev_patient_status = {
-            p.id: p.status for p in self._patient_manager.patients
-        }
+        self._prev_vitals = {p.id: p.vitals_score for p in self._patient_manager.patients}
+        self._prev_patient_status = {p.id: p.status for p in self._patient_manager.patients}
 
         lo, hi = REWARD_STEP_CLAMP
         return max(lo, min(hi, reward))

@@ -108,6 +108,28 @@ TASK_DEFINITIONS = {
 # API Endpoints
 # =============================================================================
 
+@app.get("/health")
+async def health_check() -> dict:
+    """Health check endpoint."""
+    return {"status": "healthy", "environment": "CodeRedEnv"}
+
+
+@app.get("/info")
+async def get_info() -> dict:
+    """Return environment metadata and endpoint summary."""
+    return {
+        "name": "CodeRedEnv",
+        "description": "Emergency Medical Coordination Environment (OpenEnv)",
+        "endpoints": {
+            "health": "GET /health",
+            "tasks": "GET /tasks",
+            "info": "GET /info",
+            "grade": "POST /grade",
+            "inference": "POST /inference",
+        },
+    }
+
+
 @app.get("/tasks")
 async def get_tasks() -> dict:
     """Return task definitions for all 5 tasks."""
@@ -121,7 +143,7 @@ class GraderRequest(BaseModel):
     seed: int
 
 
-@app.post("/grader")
+@app.post("/grade")
 async def grade_task(req: GraderRequest) -> dict:
     """Run a dummy agent episode and return the rubric score."""
     env = CodeRedEnvironment()
@@ -140,40 +162,80 @@ async def grade_task(req: GraderRequest) -> dict:
     return asdict(result)
 
 
-class BaselineRequest(BaseModel):
-    task_id: Literal["task1", "task2", "task3", "task4", "task5"]
-    openai_api_key: str | None = None
+# Alias for backward compat with spec
+@app.post("/grader", include_in_schema=False)
+async def grade_task_alias(req: GraderRequest) -> dict:
+    """Alias for /grade. DEPRECATED — use /grade instead."""
+    return await grade_task(req)
+
+
+# =============================================================================
+# Inference endpoint — streams real-time agent output + final grade
+# =============================================================================
+
+class InferenceRequest(BaseModel):
+    task_id: Literal["task1", "task2", "task3", "task4", "task5"] = "task1"
+    seed: int = 0
+    max_steps: int = 30
+    provider: Literal["openai", "anthropic", "hf_fallback", "auto"] = "auto"
     model: str | None = None
 
 
-@app.post("/baseline")
-async def run_baseline(req: BaselineRequest) -> dict:
-    """Run OpenAI baseline agent on seeds [0, 1, 2] and return scores."""
-    try:
-        from inference import run_agent as run_baseline_agent
-    except ImportError:
-        raise HTTPException(
-            status_code=501,
-            detail="Inference agent not implemented yet. Run manually with inference.py"
-        )
+@app.post("/inference")
+async def run_inference(req: InferenceRequest):
+    """
+    Run the LLM agent on a task and stream output line-by-line (SSE).
+    Each line is one of: [START], [STEP], [END], [GRADE], [BREAKDOWN], [ERROR].
+    Connect via EventSource in the browser, or curl with --no-buffer.
+    """
+    import asyncio
+    import subprocess
 
-    scores = []
-    for seed in [0, 1, 2]:
+    cmd = [
+        "python", "inference.py",
+        "--task", req.task_id,
+        "--seed", str(req.seed),
+        "--max-steps", str(req.max_steps),
+    ]
+    if req.provider != "auto":
+        cmd.extend(["--provider", req.provider])
+    if req.model:
+        cmd.extend(["--model", req.model])
+
+    async def event_stream():
         try:
-            score = run_baseline_agent(
-                task_id=req.task_id, seed=seed,
-                model=req.model or None,
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=os.path.dirname(os.path.dirname(__file__)) or "/app",
             )
-            scores.append(score)
+            # Stream stdout lines as SSE events
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip("\n")
+                if decoded:
+                    yield f"data: {decoded}\n\n"
+            # Stream stderr (warnings/errors) as error events
+            stderr = await proc.stderr.read()
+            if stderr:
+                decoded_err = stderr.decode("utf-8", errors="replace").rstrip("\n")
+                for err_line in decoded_err.splitlines():
+                    if err_line.strip():
+                        yield f"event: error\ndata: {err_line}\n\n"
+            # Send final done event
+            yield "event: done\ndata: \n\n"
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Baseline failed: {e}")
+            yield f"event: error\ndata: {str(e)}\n\n"
 
-    return {
-        "task_id": req.task_id,
-        "model": os.environ.get("OPENAI_MODEL", "gpt-5-nano"),
-        "scores": scores,
-        "mean": sum(scores) / len(scores) if scores else 0.0,
-    }
+    from starlette.responses import StreamingResponse
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
