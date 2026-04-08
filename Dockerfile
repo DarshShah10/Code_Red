@@ -5,8 +5,7 @@
 #  HF Spaces: push to darshshah1012/coderedenv (auto-builds from Dockerfile)
 # ══════════════════════════════════════════════════════════════════════════════
 
-ARG BASE_IMAGE=openenv-base:latest
-FROM ${BASE_IMAGE}
+FROM python:3.11-slim
 
 WORKDIR /app
 

@@ -1,3 +1,13 @@
+---
+title: CodeRedEnv
+emoji: 🚑
+colorFrom: red
+colorTo: blue
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # CodeRedEnv — Emergency Medical Coordination Simulation
 
 **A multi-subsystem OpenEnv-compatible RL benchmark** where an AI agent coordinates emergency medical response across Prakashnagar, India — a 12-node hub-and-spoke city with 3 hospital tiers and 5 ambulances.
