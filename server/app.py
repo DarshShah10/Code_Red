@@ -210,6 +210,30 @@ async def get_state():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# -----------------------------------------------------------------------------
+# SCHEMA (Action + Observation schema for agents)
+# -----------------------------------------------------------------------------
+
+from server.models.actions import CodeRedAction
+
+
+@app.get("/schema")
+async def get_schema():
+    """
+    Return JSON schema for all valid actions (OpenEnv compatible).
+    """
+    try:
+        # Generate schema from Pydantic / OpenEnv models
+        schema = CodeRedAction.model_json_schema()
+
+        return {
+            "action_schema": schema,
+            "note": "Use the 'type' field to select the action variant"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
 # ---------------- GRADING ----------------
 class GraderRequest(BaseModel):
     task_id: Literal["task1", "task2", "task3", "task4", "task5"]
