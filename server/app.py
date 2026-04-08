@@ -10,6 +10,22 @@ except ImportError as e:
     raise ImportError("openenv is required. Install with: uv sync") from e
 
 from fastapi import FastAPI, HTTPException
+
+# Root endpoint providing a quick overview of all available API routes
+@app.get("/")
+async def root() -> dict:
+    """Return a JSON overview of the API endpoints."""
+    return {
+        "endpoints": [
+            "/health",
+            "/info",
+            "/tasks",
+            "/reset",
+            "/step",
+            "/grade",
+            "/inference",
+        ]
+    }
 from pydantic import BaseModel
 
 from server.codered_environment import CodeRedEnvironment
