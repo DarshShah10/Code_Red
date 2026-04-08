@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 #  CodeRedEnv — Emergency Medical Coordination Simulation
 #  Build:   docker build -t codered-env .
-#  Run:     docker run -p 8000:8000 --env-file .env codered-env
+#  Run:     docker run -p 7860:7860 --env-file .env codered-env
 #  HF Spaces: push to darshshah1012/coderedenv (auto-builds from Dockerfile)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -44,7 +44,7 @@ ENV PYTHONPATH=/app
 # ── Health check ───────────────────────────────────────────────────────────────
 # NOTE: removed HEALTHCHECK to avoid restart loops during heavy package loading
 
-EXPOSE 8000
+EXPOSE 7860
 
 # ── Run server (app.py contains uvicorn.run in main()) ────────────────────────
-CMD ["python", "-m", "server.app"]
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
