@@ -41,6 +41,73 @@ from server.subsystems.constants import (
     TASK_CONFIG,
 )
 
+# =============================================================================
+# Reward configuration
+# =============================================================================
+REWARD_CONFIG = {
+    # Condition urgency multipliers — cardiac/stroke are the most time-critical
+    "urgency_weight": {
+        "cardiac": 2.0,
+        "stroke":  1.8,
+        "trauma":  1.4,
+        "general": 1.0,
+    },
+
+    # Vitals delta weight (raw delta * urgency * this)
+    "vitals_delta_weight": 3.0,
+
+    # Per-step holding penalties — bleed reward for every step of inaction
+    "waiting_penalty_per_step":     -0.04,   # waiting / deteriorating / critical
+    "dispatched_penalty_per_step":  -0.01,   # ambulance assigned, en-route
+    "transporting_penalty_per_step":-0.005,  # patient picked up, moving
+
+    # One-shot milestone rewards (fired on status transition, urgency-scaled)
+    "milestone": {
+        "dispatched":      +0.30,
+        "transporting":    +0.20,
+        "in_treatment":    +0.50,
+        "treated_on_time": +3.00,   # treated within target window
+        "treated_late":    +1.20,   # treated but over-target (fades with lateness)
+        "deceased":        -4.00,
+    },
+
+    # Extra speed bonus stacked on treated_on_time for being early
+    "time_bonus_max": 2.00,
+
+    # Hospital routing (fired immediately on AssignHospital)
+    "correct_hospital_bonus":  +0.25,
+    "wrong_hospital_penalty":  -0.50,
+    "diversion_penalty":       -0.30,
+    "nearest_capable_bonus":   +0.15,  # chosen hospital is ≤2 min from optimal
+
+    # ALS / BLS triage (scored when ground truth is revealed)
+    "als_correct_dispatch":      +0.20,
+    "bls_correct_dispatch":      +0.10,
+    "als_undertriage_penalty":   -0.60,  # BLS sent, ALS needed — dangerous
+    "als_overtriage_penalty":    -0.15,  # ALS sent, BLS sufficient — wasteful
+    "no_dispatch_unnecessary":   +0.05,
+    "no_dispatch_urgent_penalty":-0.80,
+
+    # Proactive preparation (OR prep / specialist page that helps an inbound patient)
+    "or_prep_used_bonus":          +0.20,
+    "specialist_paged_used_bonus": +0.15,
+
+    # Blood management
+    "emergency_blood_needed_bonus": +0.05,  # emergency release for critical patient
+
+    # Mutual aid
+    "mutual_aid_saves_bonus":   +0.40,
+    "mutual_aid_wasted_penalty":-0.25,
+
+    # Wasted / spam
+    "wasted_action_penalty":    -0.08,
+    "spam_penalty_per_repeat":  -0.15,
+    "spam_threshold":           5,
+
+    # Step reward clamp
+    "step_reward_clamp": (-3.0, 5.0),
+}
+
 
 class CodeRedEnvironment(Environment):
     """OpenEnv environment for emergency medical coordination."""
@@ -72,22 +139,18 @@ class CodeRedEnvironment(Environment):
         self._pending_or_queries: Dict[str, int] = {}
         self._active_disruptions: List[Dict] = []
         self._episode_log: List[dict] = []
-        # Track active surgeries for treatment_complete detection
-        self._active_surgeries: Dict[str, Dict] = {}  # patient_id -> {hosp_id, or_index, start_step}
-        # Prev snapshots for dense reward computation
+        self._active_surgeries: Dict[str, Dict] = {}
         self._prev_vitals: Dict[str, float] = {}
         self._prev_patient_status: Dict[str, str] = {}
         self._pending_calls: List = []
         self._pending_call_countdown: Dict[str, int] = {}
-        self._pending_call_to_patient: Dict[str, Dict] = {}  # call_id -> {ambulance_id, location_node, spawned, spawned_patient_id}
-        # Track ambulance→pending_patient linkage for Phase 2 arrival detection.
-        # Keyed by ambulance_id. Keeps dispatch→spawn linkage even after call is removed from _pending_calls.
-        self._ambulance_pending_patient: Dict[str, Dict] = {}  # amb_id -> {call_id, location_node}
+        self._pending_call_to_patient: Dict[str, Dict] = {}
+        self._ambulance_pending_patient: Dict[str, Dict] = {}
         self._dispatch_outcomes_history: List = []
         self._cascade_engine = CascadeEngine()
         self._step_count_since_last_call: int = 0
-        # Phase 2: track whether any patient has ever existed or a call was queued
         self._phase2_has_activity: bool = False
+        self._action_counts: Dict[str, int] = {}
 
     # =========================================================================
     # Public API
@@ -105,7 +168,6 @@ class CodeRedEnvironment(Environment):
 
         self._rng = random.Random(seed)
 
-        # Initialize all subsystems
         from server.subsystems.road_network import RoadNetwork
         from server.subsystems.hospital_system import HospitalSystem
         from server.subsystems.blood_bank import BloodBankSystem
@@ -153,11 +215,9 @@ class CodeRedEnvironment(Environment):
         self._dispatch_outcomes_history = []
         self._step_count_since_last_call = 0
         self._phase2_has_activity = False
-        self._ambulance_pending_patient: Dict[str, Dict] = {}  # amb_id -> {call_id, location_node}
-        # Exploit detection: track repeated actions
+        self._ambulance_pending_patient: Dict[str, Dict] = {}
         self._action_counts: Dict[str, int] = {}
 
-        # Log patient creation
         for p in self._patients:
             target_time = PATIENT_TARGET_TIMES.get(p.condition, 60)
             self._episode_log.append({
@@ -169,7 +229,6 @@ class CodeRedEnvironment(Environment):
                 "target_time": target_time,
             })
 
-        # Snapshot vitals and status for reward computation
         for p in self._patients:
             self._prev_vitals[p.id] = p.vitals_score
             self._prev_patient_status[p.id] = p.status
@@ -185,26 +244,19 @@ class CodeRedEnvironment(Environment):
         """Execute one timestep and return the observation."""
         self._state.step_count += 1
         self._alerts = []
+        self._action_counts = {}  # reset per-step spam counter
 
-        # Advance all systems by 1 minute
         self._advance_time()
-
-        # Execute action(s)
         self._execute_action(action)
 
-        # E3: Action spam rate limiting — penalize after 10 identical actions
+        # Track action type for spam detection
         action_key = type(action).__name__
         self._action_counts[action_key] = self._action_counts.get(action_key, 0) + 1
-        if self._action_counts[action_key] > 10 and len(self._alerts) < 3:
-            self._alerts.append(f"Action spam: {action_key} repeated {self._action_counts[action_key]} times")
 
-        # Compute reward BEFORE done check (OpenEnv spec compliance — Task 14)
         reward = self._compute_step_reward()
         self._state.cum_reward += reward
 
-        # Check termination
         done = self._check_done()
-
         obs = self._build_observation(done=done)
         return obs
 
@@ -213,16 +265,14 @@ class CodeRedEnvironment(Environment):
         return self._state
 
     def get_episode_log(self) -> List[dict]:
-        """Return the full episode log for grading."""
         return self._episode_log.copy()
 
     # =========================================================================
-    # Time Advancement
+    # Time Advancement  (unchanged from original)
     # =========================================================================
 
     def _advance_time(self) -> None:
         """Advance all systems by 1 minute."""
-        # Patient deterioration + outcome check (with overcrowding modifier)
         active_patients = [p for p in self._patients if p.status not in ("treated", "deceased")]
         overcrowding_modifier = self._cascade_engine.check_overcrowding(len(active_patients))
         self._patient_manager.tick(
@@ -230,7 +280,6 @@ class CodeRedEnvironment(Environment):
             self._state.step_count,
             overcrowding_modifier=overcrowding_modifier,
         )
-        # Check for patient deaths/outcomes
         for p in self._patients:
             if p.status == "deceased" and not any(
                 log.get("patient_id") == p.id and log.get("event") == "patient_deceased"
@@ -242,33 +291,26 @@ class CodeRedEnvironment(Environment):
                     "event": "patient_deceased",
                     "reason": "timeout",
                 })
-                # Release ICU bed if patient was admitted (Task 4)
                 if p.icu_status == "admitted" and p.assigned_hospital:
                     self._hospital_system.release_icu_bed(p.assigned_hospital)
 
-        # Ambulances
         self._ambulance_manager.tick()
         for amb_id, amb in self._ambulance_manager.all().items():
             if amb.arrived_with_patient:
-                # Task 16: scene time expired — deliver patient to hospital
                 amb.arrived_with_patient = False
                 if amb.patient_id:
                     patient = next((pt for pt in self._patients if pt.id == amb.patient_id), None)
                     if patient and patient.status == "transporting":
                         self._do_treatment_arrival(patient, amb_id)
             elif amb.status == "on_scene" and amb.eta_minutes == 0:
-                # Ambulance arrived at destination
                 if amb.patient_id:
-                    # Phase 2: Handle placeholder patient_id (e.g., "CALL:xxx")
                     resolved_patient_id = amb.patient_id
                     if resolved_patient_id.startswith("CALL:"):
-                        # Resolve placeholder to actual patient
-                        call_id = resolved_patient_id[5:]  # Remove "CALL:" prefix
+                        call_id = resolved_patient_id[5:]
                         pending_entry = self._pending_call_to_patient.get(call_id)
                         if pending_entry and pending_entry.get("spawned"):
                             resolved_patient_id = pending_entry["spawned_patient_id"]
                         else:
-                            # Patient not spawned yet — spawn it now so ambulance has someone
                             self._force_spawn_at_scene(call_id, amb_id)
                             reloaded = self._pending_call_to_patient.get(call_id, {})
                             if reloaded and reloaded.get("spawned"):
@@ -279,21 +321,16 @@ class CodeRedEnvironment(Environment):
                     if resolved_patient_id:
                         patient = next((pt for pt in self._patients if pt.id == resolved_patient_id), None)
                         if patient and patient.status == "waiting":
-                            # Ambulance just arrived at patient — start scene time countdown
                             patient.status = "transporting"
                             patient.assigned_ambulance = amb_id
                             amb.patient_id = resolved_patient_id
                 else:
-                    # Phase 2: ambulance arrived but no patient_id set (patient not yet spawned).
-                    # Spawn the patient via countdown expiry or ambulance arrival and link them.
                     pending = self._ambulance_pending_patient.get(amb_id)
                     if pending:
                         call_id = pending["call_id"]
                         entry = self._pending_call_to_patient.get(call_id, {})
                         if not entry.get("spawned"):
-                            # Patient not spawned yet — spawn it now and link
                             self._force_spawn_at_scene(call_id, amb_id)
-                            # Reload after spawn
                             reloaded = self._pending_call_to_patient.get(call_id, {})
                             if reloaded and reloaded.get("spawned"):
                                 spawned_pid = reloaded["spawned_patient_id"]
@@ -303,14 +340,11 @@ class CodeRedEnvironment(Environment):
                                     patient.assigned_ambulance = amb_id
                                     amb.patient_id = spawned_pid
 
-        # Mutual aid: delegate to subsystem
         def _ma_arrival_callback(ma_id: str, patient_id: str) -> None:
-            """Called by MutualAidManager when a MA arrives with a patient."""
             patient = self._patient_manager.get(patient_id)
             if patient and patient.status == "transporting":
                 self._do_treatment_arrival(patient, ma_id)
 
-        # Advance MA state and process arrivals
         ma_arrivals = self._mutual_aid_manager.tick(
             step_count=self._state.step_count,
             patient_manager=self._patient_manager,
@@ -318,15 +352,12 @@ class CodeRedEnvironment(Environment):
             arrival_callback=_ma_arrival_callback,
         )
         for event in ma_arrivals:
-            # When patient was auto-assigned at arrival (different from request time),
-            # update the mutual_aid_called log entry so grader can match by patient_id
             if event.get("patient_changed") and event.get("patient_id"):
                 for entry in self._episode_log:
                     if (entry.get("event") == "mutual_aid_called"
                             and entry.get("ambulance_id") == event["ambulance_id"]
                             and entry.get("patient_id") != event["patient_id"]):
                         entry["patient_id"] = event["patient_id"]
-                        # Can't meet original optimal when patient changed — use actual as baseline
                         entry["optimal_arrival_step"] = event["actual_arrival_step"]
                         break
 
@@ -336,6 +367,7 @@ class CodeRedEnvironment(Environment):
                 "ambulance_id": event["ambulance_id"],
                 "patient_id": event.get("patient_id"),
                 "actual_arrival_step": event.get("actual_arrival_step", self._state.step_count),
+                "had_patient": event.get("had_patient", False),
             })
             if event.get("had_patient"):
                 self._alerts.append(
@@ -347,16 +379,12 @@ class CodeRedEnvironment(Environment):
                     f"Mutual aid {event['ambulance_id']} arrived but no waiting patient — wasted"
                 )
 
-        # Hospitals
-        # Capture active surgery patient IDs BEFORE tick to detect completions
         pre_tick_surgery_patients = set(self._active_surgeries.keys())
-
         self._hospital_system.tick()
 
-        # After tick: detect completed surgeries (OR patient_id cleared)
         for patient_id in list(pre_tick_surgery_patients):
             if patient_id not in self._active_surgeries:
-                continue  # already handled
+                continue
             surgery_info = self._active_surgeries[patient_id]
             hosp = self._hospital_system.get(surgery_info["hospital_id"])
             if hosp:
@@ -365,13 +393,10 @@ class CodeRedEnvironment(Environment):
                     None,
                 )
                 if or_obj and or_obj.status == "idle" and or_obj.patient_id is None:
-                    # Surgery just completed — roll mortality based on hospital quality
                     patient = self._patient_manager.get(patient_id)
                     if patient and patient.status == "in_treatment":
                         effective_time = self._state.step_count - surgery_info["start_step"]
                         target_time = PATIENT_TARGET_TIMES.get(patient.condition, 60)
-
-                        # Hospital quality variance (Task 12): roll mortality
                         hosp_id = patient.assigned_hospital
                         mort_rates = HOSPITAL_MORTALITY_RATES.get(hosp_id, {})
                         mort_rate = mort_rates.get(patient.condition, 0.0)
@@ -384,17 +409,13 @@ class CodeRedEnvironment(Environment):
                             self._patient_manager.mark_deceased(patient_id, reason="hospital_mortality")
                             patient.outcome = "deceased"
 
-                        # Phase 2: Cascade engine trigger on outcome
                         cascade_enabled = TASK_CONFIG.get(self._state.task_id, {}).get("cascade_enabled", False)
                         if cascade_enabled:
-                            outcome_str = patient.outcome
                             self._cascade_engine.on_outcome(
-                                patient_id, patient.condition, outcome_str, self._state.step_count
+                                patient_id, patient.condition, patient.outcome, self._state.step_count
                             )
 
-                        # Release ICU bed on treatment completion (Task 13)
                         self._hospital_system.release_icu_bed(hosp_id)
-
                         self._episode_log.append({
                             "step": self._state.step_count,
                             "patient_id": patient_id,
@@ -406,7 +427,6 @@ class CodeRedEnvironment(Environment):
                         })
                         del self._active_surgeries[patient_id]
 
-        # After hospital tick: check if any waiting patient can now start surgery
         for patient in self._patients:
             if (
                 patient.status == "in_treatment"
@@ -440,7 +460,6 @@ class CodeRedEnvironment(Environment):
                                 "or_index": idle_or.index,
                             })
 
-        # Blood bank
         self._blood_bank.tick()
         completed = self._blood_bank.flush_completed_crossmatches()
         for entry in completed:
@@ -449,24 +468,20 @@ class CodeRedEnvironment(Environment):
                 f"{entry['blood_type']} reserved for {entry['patient_id']}"
             )
 
-        # Road disruptions tick
         self._road_network.tick()
         self._road_network_tick_disruptions()
 
-        # Pending blood type queries (from QueryBloodType action)
         for patient_id in list(self._pending_blood_queries.keys()):
             self._pending_blood_queries[patient_id] -= 1
             if self._pending_blood_queries[patient_id] <= 0:
                 del self._pending_blood_queries[patient_id]
                 self._reveal_blood_type(patient_id)
 
-        # Pending OR queries
         for key in list(self._pending_or_queries.keys()):
             self._pending_or_queries[key] -= 1
             if self._pending_or_queries[key] <= 0:
                 del self._pending_or_queries[key]
 
-        # Roll new disruptions
         events = self._disruption_engine.roll_disruptions(
             step=self._state.step_count,
             road_network=self._road_network,
@@ -474,7 +489,6 @@ class CodeRedEnvironment(Environment):
         )
         for event in events:
             if event["target_type"] == "surge":
-                # Spawn 1-2 secondary patients on surge
                 num_secondary = self._rng.randint(1, 2)
                 conditions = self._rng.sample(["cardiac", "stroke", "trauma", "general"], k=num_secondary)
                 for cond in conditions:
@@ -497,24 +511,20 @@ class CodeRedEnvironment(Environment):
                     f"Disruption: {event['disruption_type']} on {event['target']}"
                 )
 
-        # Cascade engine tick (Phase 2)
         self._cascade_engine.tick()
 
-        # Call queue spawning (Phase 2)
         use_call_queue = TASK_CONFIG.get(self._state.task_id, {}).get("use_call_queue", False)
         if use_call_queue:
             self._step_count_since_last_call += 1
             if self._step_count_since_last_call >= 8:
                 self._spawn_dispatch_call()
                 self._step_count_since_last_call = 0
-            # Tick down pending call countdowns
             for call_id in list(self._pending_call_countdown.keys()):
                 self._pending_call_countdown[call_id] -= 1
                 if self._pending_call_countdown[call_id] <= 0:
                     self._spawn_patient_from_call(call_id)
 
     def _road_network_tick_disruptions(self) -> None:
-        """Process road network disruption events — check for newly expired disruptions."""
         active = self._road_network.get_active_disruptions()
         for disp in active:
             if disp["remaining_steps"] <= 0:
@@ -522,29 +532,21 @@ class CodeRedEnvironment(Environment):
                 self._alerts.append(f"Road cleared: {disp['from_node']} <-> {disp['to_node']}")
 
     def _reveal_blood_type(self, patient_id: str) -> None:
-        """Reveal a patient's blood type."""
         patient = self._patient_manager.get(patient_id)
         if patient:
             patient.blood_type = self._rng.choice(BLOOD_TYPES)
             self._alerts.append(f"Blood type revealed for {patient_id}: {patient.blood_type}")
 
     def _do_treatment_arrival(self, patient, ambulance_id: str) -> None:
-        """Handle patient arriving at hospital for treatment."""
         if patient.assigned_hospital:
             hosp = self._hospital_system.get(patient.assigned_hospital)
             if hosp:
-                # Determine procedure type based on condition
                 procedure_type = PROCEDURE_BY_CONDITION.get(patient.condition, "general")
-
-                # Check OR and specialist availability
                 idle_or = self._hospital_system.get_idle_or(patient.assigned_hospital)
-                # Determine required specialist type
                 specialist_type = SPECIALIST_BY_CONDITION.get(patient.condition, "general_surgeon")
                 specialist_available = self._hospital_system.is_specialist_available(
                     patient.assigned_hospital, specialist_type
                 )
-
-                # Log patient_arrived_hospital event
                 self._episode_log.append({
                     "step": self._state.step_count,
                     "patient_id": patient.id,
@@ -553,8 +555,6 @@ class CodeRedEnvironment(Environment):
                     "or_ready": idle_or is not None,
                     "specialist_available": specialist_available,
                 })
-
-                # ICU bed constraint (Task 13): consume bed only if hospital can treat this condition
                 if self._hospital_system.can_treat(patient.assigned_hospital, patient.condition):
                     icu_available = self._hospital_system.consume_icu_bed(patient.assigned_hospital)
                     if icu_available:
@@ -567,10 +567,7 @@ class CodeRedEnvironment(Environment):
                             "event": "icu_boarding",
                             "hospital_id": patient.assigned_hospital,
                         })
-
-                # Start surgery/treatment if OR available
                 if idle_or:
-                    # Start surgery
                     result = self._hospital_system.start_surgery(
                         patient.assigned_hospital,
                         idle_or.index,
@@ -581,7 +578,6 @@ class CodeRedEnvironment(Environment):
                     if result["success"]:
                         patient.status = "in_treatment"
                         patient.arrival_hospital_step = self._state.step_count
-                        # Track active surgery for treatment_complete detection
                         self._active_surgeries[patient.id] = {
                             "hospital_id": patient.assigned_hospital,
                             "or_index": idle_or.index,
@@ -595,26 +591,21 @@ class CodeRedEnvironment(Environment):
                             "hospital_id": patient.assigned_hospital,
                             "or_index": idle_or.index,
                         })
-
-                        # Mark ambulance as available
                         self._ambulance_manager.mark_available(ambulance_id)
                 else:
-                    # No OR available, patient waits in treating status
                     patient.status = "in_treatment"
 
     # =========================================================================
-    # Action Execution
+    # Action Execution  (unchanged except _do_assign_hospital — see below)
     # =========================================================================
 
     def _execute_action(self, action: CodeRedAction) -> None:
-        """Dispatch action to the appropriate handler."""
         from .models.actions import (
             DispatchAmbulance, PrepareOR, PageSpecialist, AssignHospital,
             PreemptOR, AllocateBlood, TransferBlood, RequestMutualAid,
             QueryBloodType, QueryORStatus, MaintainPlan, TriageCall,
             DispatchALS, DispatchBLS,
         )
-
         if isinstance(action, DispatchAmbulance):
             self._do_dispatch_ambulance(action)
         elif isinstance(action, DispatchALS):
@@ -645,7 +636,6 @@ class CodeRedEnvironment(Environment):
             pass
 
     def _do_dispatch_ambulance(self, action) -> None:
-        from .models.actions import DispatchAmbulance
         result = self._ambulance_manager.dispatch(
             action.ambulance_id, action.target_node, self._road_network
         )
@@ -659,18 +649,14 @@ class CodeRedEnvironment(Environment):
                 "reason": result["reason"],
             })
             return
-
-        # If patient at target node, assign
         waiting_patient = next(
             (p for p in self._patients
-             if p.status == "waiting"
-             and p.location_node == action.target_node),
+             if p.status == "waiting" and p.location_node == action.target_node),
             None,
         )
         if waiting_patient:
             waiting_patient.assigned_ambulance = action.ambulance_id
             waiting_patient.status = "dispatched"
-            # Update ambulance with patient assignment
             amb = self._ambulance_manager.get(action.ambulance_id)
             if amb:
                 amb.patient_id = waiting_patient.id
@@ -682,7 +668,6 @@ class CodeRedEnvironment(Environment):
                 "result": "success",
             })
         else:
-            # Dispatched but no patient at location
             self._episode_log.append({
                 "step": self._state.step_count,
                 "event": "action_dispatch",
@@ -692,7 +677,6 @@ class CodeRedEnvironment(Environment):
             })
 
     def _do_prepare_or(self, action) -> None:
-        from .models.actions import PrepareOR
         result = self._hospital_system.prepare_or(action.hospital_id, action.procedure_type)
         if not result["success"]:
             self._alerts.append(f"PrepareOR failed: {result['reason']}")
@@ -705,8 +689,6 @@ class CodeRedEnvironment(Environment):
                 "reason": result["reason"],
             })
             return
-
-        # E4: Detect wasted OR prep — no patient en route to this hospital
         patient_en_route = any(
             p.status in ("dispatched", "transporting")
             and getattr(p, "assigned_hospital", None) == action.hospital_id
@@ -715,9 +697,8 @@ class CodeRedEnvironment(Environment):
         prep_result = "success" if patient_en_route else "wasted"
         if prep_result == "wasted":
             self._alerts.append(
-                f"PrepareOR wasted: no patient en route to {action.hospital_id} for {action.procedure_type}"
+                f"PrepareOR wasted: no patient en route to {action.hospital_id}"
             )
-
         self._episode_log.append({
             "step": self._state.step_count,
             "event": "action_prepare_or",
@@ -728,7 +709,6 @@ class CodeRedEnvironment(Environment):
         })
 
     def _do_page_specialist(self, action) -> None:
-        from .models.actions import PageSpecialist
         result = self._hospital_system.page_specialist(action.hospital_id, action.specialist_type)
         if not result["success"]:
             self._alerts.append(f"PageSpecialist failed: {result['reason']}")
@@ -750,24 +730,52 @@ class CodeRedEnvironment(Environment):
         })
 
     def _do_assign_hospital(self, action) -> None:
-        from .models.actions import AssignHospital
+        """Assign hospital with immediate routing-quality reward signal."""
         patient = self._patient_manager.get(action.patient_id)
         if patient is None:
             self._alerts.append(f"AssignHospital failed: patient {action.patient_id} not found")
             return
+
+        routing_reward = self._score_hospital_routing(patient, action.hospital_id)
+
         if not self._hospital_system.can_treat(action.hospital_id, patient.condition):
             self._alerts.append(
-                f"AssignHospital failed: {action.hospital_id} cannot treat "
+                f"AssignHospital: {action.hospital_id} cannot treat "
                 f"{patient.condition} (needs {PATIENT_CONDITION_REQUIREMENTS[patient.condition][0]})"
             )
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_assign_hospital",
+                "patient_id": action.patient_id,
+                "hospital_id": action.hospital_id,
+                "result": "failed",
+                "_routing_reward": routing_reward,
+            })
             return
+
         if self._hospital_system.get(action.hospital_id).on_diversion:
-            self._alerts.append(f"AssignHospital failed: {action.hospital_id} is on diversion")
+            self._alerts.append(f"AssignHospital: {action.hospital_id} is on diversion")
+            self._episode_log.append({
+                "step": self._state.step_count,
+                "event": "action_assign_hospital",
+                "patient_id": action.patient_id,
+                "hospital_id": action.hospital_id,
+                "result": "diversion",
+                "_routing_reward": routing_reward,
+            })
             return
+
         patient.assigned_hospital = action.hospital_id
+        self._episode_log.append({
+            "step": self._state.step_count,
+            "event": "action_assign_hospital",
+            "patient_id": action.patient_id,
+            "hospital_id": action.hospital_id,
+            "result": "success",
+            "_routing_reward": routing_reward,
+        })
 
     def _do_preempt_or(self, action) -> None:
-        from .models.actions import PreemptOR
         result = self._hospital_system.preempt_or(action.hospital_id, action.or_index)
         if not result["success"]:
             self._alerts.append(f"PreemptOR failed: {result['reason']}")
@@ -795,7 +803,6 @@ class CodeRedEnvironment(Environment):
         })
 
     def _do_allocate_blood(self, action) -> None:
-        from .models.actions import AllocateBlood
         if action.emergency:
             result = self._blood_bank.emergency_release(
                 action.hospital_id, action.patient_id, action.blood_type, action.units
@@ -814,8 +821,8 @@ class CodeRedEnvironment(Environment):
                 })
                 return
             self._alerts.append(
-                f"Emergency blood: {result['units']} units {result['blood_type']} released for {action.patient_id} "
-                f"at {action.hospital_id}"
+                f"Emergency blood: {result['units']} units {result['blood_type']} "
+                f"released for {action.patient_id} at {action.hospital_id}"
             )
             self._episode_log.append({
                 "step": self._state.step_count,
@@ -854,7 +861,6 @@ class CodeRedEnvironment(Environment):
             })
 
     def _do_transfer_blood(self, action) -> None:
-        from .models.actions import TransferBlood
         result = self._blood_bank.transfer(
             action.from_hospital, action.to_hospital, action.blood_type, action.units
         )
@@ -867,11 +873,9 @@ class CodeRedEnvironment(Environment):
         )
 
     def _do_request_mutual_aid(self, action) -> None:
-        from .models.actions import RequestMutualAid
         if self._mutual_aid_manager.get_available() <= 0:
             self._alerts.append("Mutual aid failed: no calls remaining")
             return
-
         ma_id = self._mutual_aid_manager.request(
             step_count=self._state.step_count,
             road_network=self._road_network,
@@ -880,23 +884,15 @@ class CodeRedEnvironment(Environment):
         if ma_id is None:
             self._alerts.append("Mutual aid failed: no calls remaining")
             return
-
-        # Sync state for API consumers
         self._state.mutual_aid_available = self._mutual_aid_manager.get_available()
         self._state.mutual_aid_used = self._mutual_aid_manager.get_used()
-
-        # Determine optimal arrival for logging
         pending = self._mutual_aid_manager.get_pending().get(ma_id)
         if pending:
             target_pid = pending.patient_id
-            if target_pid:
-                patient = self._patient_manager.get(target_pid)
-                self._alerts.append(
-                    f"Mutual aid requested: {ma_id} for {target_pid} "
-                    f"(ETA step {pending.arrival_step})"
-                )
-            else:
-                self._alerts.append(f"Mutual aid requested: {ma_id} — no waiting patients")
+            self._alerts.append(
+                f"Mutual aid requested: {ma_id} for {target_pid} (ETA step {pending.arrival_step})"
+                if target_pid else f"Mutual aid requested: {ma_id} — no waiting patients"
+            )
             self._episode_log.append({
                 "step": self._state.step_count,
                 "event": "mutual_aid_called",
@@ -906,16 +902,13 @@ class CodeRedEnvironment(Environment):
             })
 
     def _do_query_blood_type(self, action) -> None:
-        from .models.actions import QueryBloodType
         patient = self._patient_manager.get(action.patient_id)
         if patient is None:
             self._alerts.append(f"QueryBloodType failed: patient {action.patient_id} not found")
             return
-        # Schedule blood type reveal after 5 minutes
         self._pending_blood_queries[action.patient_id] = 5
 
     def _do_query_or_status(self, action) -> None:
-        from .models.actions import QueryORStatus
         hosp = self._hospital_system.get(action.hospital_id)
         if hosp is None:
             return
@@ -927,7 +920,6 @@ class CodeRedEnvironment(Environment):
             )
 
     def _do_triage_call(self, action) -> None:
-        """Handle TriageCall action - decide what to do with a pending dispatch call."""
         from server.models.entities import DispatchCategory
         from server.subsystems.constants import DISPATCH_CATEGORY_MAP, ALS_NEEDED_PROB
         call = next((c for c in self._pending_calls if c["call_id"] == action.call_id), None)
@@ -951,10 +943,6 @@ class CodeRedEnvironment(Environment):
             if not result["success"]:
                 self._alerts.append(f"Dispatch failed")
                 return
-
-            # Track call→patient linkage for arrival detection
-            # The patient hasn't spawned yet (will spawn when ambulance arrives or countdown expires).
-            # We store a pending linkage that gets resolved when patient spawns.
             self._pending_call_to_patient[action.call_id] = {
                 "ambulance_id": action.ambulance_id,
                 "location_node": call["location_node"],
@@ -962,19 +950,14 @@ class CodeRedEnvironment(Environment):
                 "spawned_patient_id": None,
             }
             self._phase2_has_activity = True
-            # Also track by ambulance_id for arrival handler lookup
             self._ambulance_pending_patient[action.ambulance_id] = {
                 "call_id": action.call_id,
                 "location_node": call["location_node"],
             }
-
-            # Mark ambulance with CALL: placeholder so tick() starts scene countdown on arrival
             amb = self._ambulance_manager.get(action.ambulance_id)
             if amb:
                 amb.patient_id = f"CALL:{action.call_id}"
                 amb.target_node = call["location_node"]
-
-            # And set ambulance on the call dict for lookup
             call["assigned_ambulance_id"] = action.ambulance_id
             call["spawned_patient_id"] = None
             category = call["category"]
@@ -995,18 +978,16 @@ class CodeRedEnvironment(Environment):
         elif decision == "self_transport":
             category = call["category"]
             cat_val = category.value if hasattr(category, "value") else category
-            outcome = {
+            self._dispatch_outcomes_history.append({
                 "call_id": call["call_id"],
                 "decision": "self_transport",
                 "category": cat_val,
                 "true_condition": None,
                 "als_needed": None,
                 "revealed_at_step": None,
-            }
-            self._dispatch_outcomes_history.append(outcome)
+            })
             self._pending_calls = [c for c in self._pending_calls if c["call_id"] != action.call_id]
-            if action.call_id in self._pending_call_countdown:
-                del self._pending_call_countdown[action.call_id]
+            self._pending_call_countdown.pop(action.call_id, None)
             self._alerts.append(f"Self-transport advised for {action.call_id}")
         elif decision == "callback":
             call["time_waiting"] = 0
@@ -1015,39 +996,29 @@ class CodeRedEnvironment(Environment):
         elif decision == "no_dispatch":
             category = call["category"]
             cat_val = category.value if hasattr(category, "value") else category
-            outcome = {
+            self._dispatch_outcomes_history.append({
                 "call_id": call["call_id"],
                 "decision": "no_dispatch",
                 "category": cat_val,
                 "true_condition": None,
                 "als_needed": None,
                 "revealed_at_step": None,
-            }
-            self._dispatch_outcomes_history.append(outcome)
+            })
             self._pending_calls = [c for c in self._pending_calls if c["call_id"] != action.call_id]
-            if action.call_id in self._pending_call_countdown:
-                del self._pending_call_countdown[action.call_id]
+            self._pending_call_countdown.pop(action.call_id, None)
             self._alerts.append(f"No dispatch for {action.call_id}")
 
     def _do_dispatch_als(self, action) -> None:
-        """Handle DispatchALS action."""
         from .models.actions import TriageCall
-        triage = TriageCall(
-            call_id=action.call_id,
-            decision="dispatch_als",
-            ambulance_id=action.ambulance_id,
-        )
-        self._do_triage_call(triage)
+        self._do_triage_call(TriageCall(
+            call_id=action.call_id, decision="dispatch_als", ambulance_id=action.ambulance_id
+        ))
 
     def _do_dispatch_bls(self, action) -> None:
-        """Handle DispatchBLS action."""
         from .models.actions import TriageCall
-        triage = TriageCall(
-            call_id=action.call_id,
-            decision="dispatch_bls",
-            ambulance_id=action.ambulance_id,
-        )
-        self._do_triage_call(triage)
+        self._do_triage_call(TriageCall(
+            call_id=action.call_id, decision="dispatch_bls", ambulance_id=action.ambulance_id
+        ))
 
     # =========================================================================
     # Termination & Reward
@@ -1057,10 +1028,7 @@ class CodeRedEnvironment(Environment):
         """Check if episode should terminate."""
         if self._state.step_count >= self._state.max_steps:
             return True
-        non_terminal = [
-            p for p in self._patients
-            if p.status not in ("treated", "deceased")
-        ]
+        non_terminal = [p for p in self._patients if p.status not in ("treated", "deceased")]
         if len(non_terminal) == 0:
             use_call_queue = TASK_CONFIG.get(self._state.task_id, {}).get("use_call_queue", False)
             has_pending = (
@@ -1068,122 +1036,250 @@ class CodeRedEnvironment(Environment):
                 or self._pending_call_countdown
                 or any(not entry.get("spawned", False) for entry in self._pending_call_to_patient.values())
             )
-            # Phase 2 (call queue): don't terminate early. Either:
-            # 1. No call activity yet (waiting for first call to spawn), OR
-            # 2. There are unresolved calls/countdowns still in the queue
             if use_call_queue and (not self._phase2_has_activity or has_pending):
-                return False  # Keep running
+                return False
             self._state.all_patients_terminal = True
             return True
-        # Early termination: all non-deceased patients have vitals_score <= 0
         alive = [p for p in self._patients if p.status not in ("treated", "deceased")]
         if alive and all(p.vitals_score <= 0.0 for p in alive):
             self._state.all_patients_terminal = True
             return True
         return False
 
-    def _compute_step_reward(self) -> float:
-        """Dense reward: vitals delta shaping + milestone bonuses/penalties."""
-        reward = 0.0
-        from server.subsystems.constants import (
-            VITALS_DELTA_WEIGHT, MILESTONE_REWARDS, REWARD_STEP_CLAMP
-        )
+    def _score_hospital_routing(self, patient, hospital_id: str) -> float:
+        """
+        Immediate routing quality signal fired when AssignHospital is executed.
 
-        # Guard: no reward computation once all patients are terminal
+        Returns a signed float that is stored in the episode log and consumed
+        by _compute_step_reward in the same step.
+        """
+        cfg = REWARD_CONFIG
+        urgency = cfg["urgency_weight"].get(patient.condition, 1.0)
+        reward = 0.0
+
+        can_treat = self._hospital_system.can_treat(hospital_id, patient.condition)
+        hosp_obj = self._hospital_system.get(hospital_id)
+        on_diversion = getattr(hosp_obj, "on_diversion", False) if hosp_obj else False
+
+        if not can_treat:
+            reward += cfg["wrong_hospital_penalty"] * urgency
+        else:
+            reward += cfg["correct_hospital_bonus"] * urgency
+
+        if on_diversion:
+            reward += cfg["diversion_penalty"] * urgency
+
+        # Nearest-capable bonus: reward choosing the closest appropriate hospital
+        if can_treat and not on_diversion:
+            patient_node = getattr(patient, "location_node", None)
+            if patient_node:
+                best_time = float("inf")
+                chosen_time = float("inf")
+                for h_id, h in self._hospital_system.all().items():
+                    if self._hospital_system.can_treat(h_id, patient.condition) and not h.on_diversion:
+                        t = self._road_network.travel_time(patient_node, h.node_id)
+                        if t < best_time:
+                            best_time = t
+                        if h_id == hospital_id:
+                            chosen_time = t
+                if chosen_time <= best_time + 2:
+                    reward += cfg["nearest_capable_bonus"] * urgency
+
+        return reward
+
+    def _compute_step_reward(self) -> float:  # noqa: C901
+        """
+        Dense, multi-signal reward function.
+
+        Signal hierarchy (high → low impact per step):
+          1. Patient outcome milestones  — large one-shot on status transitions
+          2. Time-bonus shaping          — proportional credit for treating quickly
+          3. Per-step urgency penalties  — bleeds reward while patient waits
+          4. Vitals delta                — fine-grained health tracking
+          5. Hospital routing            — instant feedback on AssignHospital quality
+          6. ALS / BLS triage            — scored when ground truth is revealed
+          7. Proactive preparation       — OR prep + specialist page that pays off
+          8. Blood management            — emergency release for critical patients
+          9. Mutual aid outcomes         — useful vs wasted
+         10. Wasted actions & spam       — mild deterrent
+        """
+        cfg = REWARD_CONFIG
+        reward = 0.0
+
         if self._state.all_patients_terminal:
             return 0.0
 
-        # 1. Vitals delta shaping
-        for pid, prev in self._prev_vitals.items():
-            curr_patient = self._patient_manager.patients_dict.get(pid)
-            if curr_patient:
-                reward += (curr_patient.vitals_score - prev) * VITALS_DELTA_WEIGHT
+        step = self._state.step_count
+        step_logs = [e for e in self._episode_log if e.get("step") == step]
 
-        # 2. Milestone bonuses/penalties
-        for pid, prev_status in self._prev_patient_status.items():
-            curr_patient = self._patient_manager.patients_dict.get(pid)
-            if curr_patient:
-                curr_status = curr_patient.status
-                if prev_status == "waiting" and curr_status == "dispatched":
-                    reward += MILESTONE_REWARDS["dispatched"]
-                if prev_status == "dispatched" and curr_status == "in_treatment":
-                    reward += MILESTONE_REWARDS["in_treatment"]
-                if prev_status != "treated" and curr_status == "treated":
-                    reward += MILESTONE_REWARDS["treated"]
-                if prev_status != "deceased" and curr_status == "deceased":
-                    reward += MILESTONE_REWARDS["deceased"]
+        # ── 1, 2, 3, 4: Per-patient signals ──────────────────────────────────
+        for patient in self._patient_manager.patients:
+            pid = patient.id
+            condition = patient.condition
+            urgency = cfg["urgency_weight"].get(condition, 1.0)
+            curr_status = patient.status
+            prev_status = self._prev_patient_status.get(pid, curr_status)
+            milestone = cfg["milestone"]
 
-        # 3. Action Spam & Wasted Action Penalty (Hybrid fix)
-        for alert in self._alerts:
-            if "Action spam" in alert:
-                reward -= 0.10
-        current_logs = [log for log in self._episode_log if log.get("step") == self._state.step_count]
-        for log in current_logs:
-            if log.get("result") == "wasted":
-                reward -= 0.02
+            # 1. Status transition milestones (urgency-scaled)
+            if prev_status == "waiting" and curr_status == "dispatched":
+                reward += milestone["dispatched"] * urgency
 
-        # 4. Phase 2: Dispatch classification (Fixed the infinite-loop exploit)
-        cascade_enabled = TASK_CONFIG.get(self._state.task_id, {}).get("cascade_enabled", False)
-        if cascade_enabled:
-            for outcome in self._dispatch_outcomes_history:
-                if outcome.get("scored") or outcome["true_condition"] is None:
-                    continue  # Skip if already rewarded or unresolved
+            if prev_status == "dispatched" and curr_status == "transporting":
+                reward += milestone["transporting"] * urgency
 
-                als_needed = outcome["als_needed"]
-                als_dispatched = (outcome["decision"] == "als")
+            if prev_status == "transporting" and curr_status == "in_treatment":
+                reward += milestone["in_treatment"] * urgency
 
-                if als_needed and als_dispatched:
-                    reward += 0.05
-                elif not als_needed and not als_dispatched:
-                    reward += 0.02
-                elif als_needed and not als_dispatched:
-                    reward -= 0.10
-                elif not als_needed and als_dispatched:
-                    reward -= 0.05
+            if prev_status not in ("treated", "deceased") and curr_status == "treated":
+                target = PATIENT_TARGET_TIMES.get(condition, 60)
+                actual = getattr(patient, "treatment_complete_time", None)
+                if actual is not None:
+                    # 2. Time-bonus shaping
+                    ratio = actual / max(target, 1)
+                    if ratio <= 1.0:
+                        # On time or early: base bonus + speed bonus (max when ratio=0)
+                        speed_bonus = cfg["time_bonus_max"] * (1.0 - ratio)
+                        reward += (milestone["treated_on_time"] + speed_bonus) * urgency
+                    else:
+                        # Late: reward fades as lateness grows, hits 0 at 2× overdue
+                        lateness_factor = max(0.0, 1.0 - (ratio - 1.0))
+                        reward += milestone["treated_late"] * lateness_factor * urgency
+                else:
+                    reward += milestone["treated_on_time"] * urgency
 
-                outcome["scored"] = True  # Mark as scored!
+            if prev_status != "deceased" and curr_status == "deceased":
+                reward += milestone["deceased"] * urgency  # large negative
 
-        # 5. Bootstrap new patients
+            # 3. Per-step holding penalties — the clock is always ticking
+            if curr_status in ("waiting", "deteriorating", "critical"):
+                reward += cfg["waiting_penalty_per_step"] * urgency
+            elif curr_status == "dispatched":
+                reward += cfg["dispatched_penalty_per_step"] * urgency
+            elif curr_status == "transporting":
+                reward += cfg["transporting_penalty_per_step"] * urgency
+
+            # 4. Vitals delta (urgency-scaled)
+            prev_v = self._prev_vitals.get(pid, patient.vitals_score)
+            delta = patient.vitals_score - prev_v
+            reward += delta * cfg["vitals_delta_weight"] * urgency
+
+        # ── 5. Hospital routing (pulled from log entries written this step) ───
+        for entry in step_logs:
+            if entry.get("event") == "action_assign_hospital":
+                reward += entry.get("_routing_reward", 0.0)
+
+        # ── 6. ALS / BLS triage scoring ──────────────────────────────────────
+        for outcome in self._dispatch_outcomes_history:
+            if outcome.get("scored"):
+                continue
+            if outcome.get("true_condition") is None:
+                continue
+            if outcome.get("revealed_at_step") != step:
+                continue
+
+            als_needed = outcome["als_needed"]
+            decision = outcome["decision"]
+
+            if decision == "als":
+                reward += cfg["als_correct_dispatch"] if als_needed else cfg["als_overtriage_penalty"]
+            elif decision == "bls":
+                reward += cfg["bls_correct_dispatch"] if not als_needed else cfg["als_undertriage_penalty"]
+            elif decision in ("self_transport", "no_dispatch"):
+                reward += cfg["no_dispatch_unnecessary"] if not als_needed else cfg["no_dispatch_urgent_penalty"]
+
+            outcome["scored"] = True
+
+        # ── 7. Proactive preparation ──────────────────────────────────────────
+        for entry in step_logs:
+            if entry.get("event") == "action_prepare_or" and entry.get("result") == "success":
+                hosp_id = entry.get("hospital_id")
+                if any(
+                    p.status in ("dispatched", "transporting", "in_treatment")
+                    and getattr(p, "assigned_hospital", None) == hosp_id
+                    for p in self._patients
+                ):
+                    reward += cfg["or_prep_used_bonus"]
+
+            if entry.get("event") == "action_page_specialist" and entry.get("result") == "success":
+                hosp_id = entry.get("hospital_id")
+                spec_type = entry.get("specialist_type")
+                if any(
+                    p.status in ("dispatched", "transporting")
+                    and getattr(p, "assigned_hospital", None) == hosp_id
+                    and SPECIALIST_BY_CONDITION.get(p.condition) == spec_type
+                    for p in self._patients
+                ):
+                    reward += cfg["specialist_paged_used_bonus"]
+
+        # ── 8. Blood management ───────────────────────────────────────────────
+        for entry in step_logs:
+            if entry.get("event") == "action_allocate_blood" and entry.get("result") == "success":
+                pid = entry.get("patient_id")
+                if pid:
+                    patient = self._patient_manager.get(pid)
+                    if patient and patient.vitals_score < 0.4:
+                        reward += cfg["emergency_blood_needed_bonus"]
+
+        # ── 9. Mutual aid outcomes ────────────────────────────────────────────
+        for entry in step_logs:
+            if entry.get("event") == "mutual_aid_arrived":
+                reward += (
+                    cfg["mutual_aid_saves_bonus"]
+                    if entry.get("had_patient")
+                    else cfg["mutual_aid_wasted_penalty"]
+                )
+
+        # ── 10. Wasted actions & spam ─────────────────────────────────────────
+        for entry in step_logs:
+            if entry.get("result") == "wasted":
+                reward += cfg["wasted_action_penalty"]
+
+        for action_type, count in self._action_counts.items():
+            if count > cfg["spam_threshold"]:
+                excess = count - cfg["spam_threshold"]
+                reward += cfg["spam_penalty_per_repeat"] * excess
+
+        # ── Bootstrap new patients (no fake milestone reward) ─────────────────
         for patient in self._patient_manager.patients:
             if patient.id not in self._prev_vitals:
                 self._prev_vitals[patient.id] = patient.vitals_score
                 self._prev_patient_status[patient.id] = patient.status
-                reward += MILESTONE_REWARDS["dispatched"]
 
+        # ── Snapshot for next step ────────────────────────────────────────────
         self._prev_vitals = {p.id: p.vitals_score for p in self._patient_manager.patients}
         self._prev_patient_status = {p.id: p.status for p in self._patient_manager.patients}
 
-        lo, hi = REWARD_STEP_CLAMP
+        # ── Clamp ─────────────────────────────────────────────────────────────
+        lo, hi = cfg["step_reward_clamp"]
         return max(lo, min(hi, reward))
 
     def _compute_time_score_preview(self) -> float:
-        """Running estimate of time_score axis."""
+        """
+        Informational time-score estimate exposed in the observation [0, 1].
+        NOT fed back into step reward to avoid double-counting.
+        """
         scores = []
         for p in self._patients:
-            if p.status == "in_treatment" and p.treatment_complete_time is not None:
-                target = PATIENT_TARGET_TIMES.get(p.condition, 60)
-                actual = p.treatment_complete_time
-                score = max(0.0, min(1.0, 1.0 - (actual - target) / target))
-                scores.append(score)
+            target = PATIENT_TARGET_TIMES.get(p.condition, 60)
+            if p.status == "treated" and p.treatment_complete_time is not None:
+                score = max(0.0, min(1.0, 1.0 - (p.treatment_complete_time - target) / max(target, 1)))
             elif p.status == "deceased":
-                scores.append(0.0)
+                score = 0.0
             else:
-                target = PATIENT_TARGET_TIMES.get(p.condition, 60)
-                projected = self._state.step_count + 5 + 10 + 10
-                score = max(0.0, min(1.0, 1.0 - (projected - target) / target))
-                scores.append(score)
+                elapsed = self._state.step_count - p.onset_step
+                projected_total = elapsed + 3 + 5 + 10  # optimistic pipeline
+                score = max(0.0, min(1.0, 1.0 - (projected_total - target) / max(target, 1)))
+            scores.append(score)
         return sum(scores) / len(scores) if scores else 1.0
 
     # =========================================================================
-    # Observation
+    # Observation  (unchanged from original)
     # =========================================================================
 
     def _build_observation(self, done: bool = False) -> CodeRedObservation:
-        """Build the current observation."""
         self._state.cum_reward = round(self._state.cum_reward, 4)
 
-        # Convert subsystem entities to Pydantic models for observation
-        # Map subsystem status to Pydantic status
         def _map_patient_status(s):
             mapping = {
                 "waiting": PatientStatus.WAITING,
@@ -1207,8 +1303,8 @@ class CodeRedEnvironment(Environment):
                 time_since_onset=self._state.step_count - p.onset_step,
                 assigned_ambulance=next(
                     (amb_id for amb_id, amb in self._ambulance_manager.all().items()
-                     if getattr(amb, 'patient_id', None) == p.id),
-                    None
+                     if getattr(amb, "patient_id", None) == p.id),
+                    None,
                 ),
                 assigned_hospital=p.assigned_hospital,
                 status=_map_patient_status(p.status),
@@ -1219,7 +1315,6 @@ class CodeRedEnvironment(Environment):
                 outcome=p.outcome,
                 is_secondary=getattr(p, "is_secondary", False),
                 icu_status=p.icu_status,
-                # Phase 2 fields
                 dispatch_call_id=getattr(p, "dispatch_call_id", None),
                 cascade_trigger_reason=getattr(p, "cascade_trigger_reason", None),
                 observed_condition=getattr(p, "observed_condition", None),
@@ -1227,10 +1322,8 @@ class CodeRedEnvironment(Environment):
             for p in self._patients
         ]
 
-        # Get ambulances from ambulance manager
         amb_states = []
         for amb_id, amb in self._ambulance_manager.all().items():
-            # Map subsystem status to Pydantic model status
             status_map = {
                 "available": AmbulanceStatus.AVAILABLE,
                 "en_route": AmbulanceStatus.DISPATCHED,
@@ -1240,7 +1333,7 @@ class CodeRedEnvironment(Environment):
             }
             amb_states.append(AmbulanceState(
                 id=amb.id,
-                node_id=amb.target_node or amb.base_node or "",  # Last known position
+                node_id=amb.target_node or amb.base_node or "",
                 equipment=AmbulanceEquipment(amb.equipment),
                 status=status_map.get(amb.status, AmbulanceStatus.AVAILABLE),
                 assigned_patient=amb.patient_id,
@@ -1249,13 +1342,12 @@ class CodeRedEnvironment(Environment):
                 destination_type="patient" if amb.target_node else None,
             ))
 
-        # Get hospitals from hospital system
         hosp_states = []
         for hosp_id, hosp in self._hospital_system.all().items():
             ors = [
                 OperatingRoom(
                     index=o.index,
-                    status=ORStatus(o.status),  # subsystem OR uses same lowercase values
+                    status=ORStatus(o.status),
                     procedure_type=o.procedure_type,
                     minutes_remaining=o.minutes_remaining,
                     patient_id=o.patient_id,
@@ -1283,7 +1375,6 @@ class CodeRedEnvironment(Environment):
                 or_prep_countdowns=dict(hosp.or_prep_countdowns),
             ))
 
-        # Get blood banks from blood bank system
         blood_states = []
         for bb_id, bb in self._blood_bank.all().items():
             blood_states.append(BloodBankState(
@@ -1292,7 +1383,6 @@ class CodeRedEnvironment(Environment):
                 crossmatch_queue=list(bb.crossmatch_queue),
             ))
 
-        # Convert road network to observation model
         road_state = RoadNetworkState()
         for key, edge in self._road_network.edges.items():
             road_state.edges[key] = EdgeState(
@@ -1304,7 +1394,6 @@ class CodeRedEnvironment(Environment):
                 disruption_type=edge.disruption_type,
             )
 
-        # Build pending_calls for Phase 2
         from server.models.entities import DispatchCall as DispatchCallModel, DispatchOutcome as DispatchOutcomeModel
         pending_calls_obs = [
             DispatchCallModel(
@@ -1317,8 +1406,6 @@ class CodeRedEnvironment(Environment):
             )
             for c in self._pending_calls
         ]
-
-        # Recent dispatch outcomes (last 5)
         recent_outcomes = [
             DispatchOutcomeModel(
                 call_id=o["call_id"],
@@ -1331,7 +1418,6 @@ class CodeRedEnvironment(Environment):
             for o in self._dispatch_outcomes_history[-5:]
         ]
 
-        # Overcrowding modifier
         active_patients = [p for p in self._patients if p.status not in ("treated", "deceased")]
         overcrowding_modifier = self._cascade_engine.check_overcrowding(len(active_patients))
 
@@ -1349,11 +1435,10 @@ class CodeRedEnvironment(Environment):
             vitals_score_preview=round(
                 sum(p.vitals_score for p in self._patients if p.status not in ("treated", "deceased"))
                 / max(1, sum(1 for p in self._patients if p.status not in ("treated", "deceased"))),
-                4
+                4,
             ),
             patients_remaining=len([
-                p for p in self._patients
-                if p.status not in ("treated", "deceased")
+                p for p in self._patients if p.status not in ("treated", "deceased")
             ]),
             pending_calls=pending_calls_obs,
             recent_dispatch_outcomes=recent_outcomes,
@@ -1361,14 +1446,14 @@ class CodeRedEnvironment(Environment):
         )
 
     # =========================================================================
-    # Helpers
+    # Helpers  (unchanged from original)
     # =========================================================================
 
     def _condition_to_tier(self, condition: str) -> PatientTier:
         mapping = {
             "cardiac": PatientTier.CRITICAL,
-            "stroke": PatientTier.CRITICAL,
-            "trauma": PatientTier.HIGH,
+            "stroke":  PatientTier.CRITICAL,
+            "trauma":  PatientTier.HIGH,
             "general": PatientTier.MEDIUM,
         }
         return mapping.get(condition, PatientTier.MEDIUM)
@@ -1381,8 +1466,7 @@ class CodeRedEnvironment(Environment):
             node = kwargs.get("spawn_node")
             if node is None:
                 from server.subsystems.patient_manager import PatientManager
-                spawn_nodes = PatientManager._SPAWN_NODES
-                node = self._rng.choice(spawn_nodes)
+                node = self._rng.choice(PatientManager._SPAWN_NODES)
             patient = self._patient_manager.spawn_secondary(
                 condition=condition, triggered_by=None, reason=reason,
                 onset_step=triggered_at_step, spawn_node=node,
@@ -1411,7 +1495,6 @@ class CodeRedEnvironment(Environment):
             })
 
     def _spawn_dispatch_call(self) -> None:
-        """Spawn a new dispatch call into the queue."""
         from server.models.entities import DispatchCategory
         from server.subsystems.constants import DISPATCH_CATEGORY_MAP
         if len(self._pending_calls) >= 5:
@@ -1421,8 +1504,7 @@ class CodeRedEnvironment(Environment):
         weights = [0.20, 0.15, 0.25, 0.20, 0.20]
         category = self._rng.choices(categories, weights=weights)[0]
         from server.subsystems.patient_manager import PatientManager
-        spawn_nodes = PatientManager._SPAWN_NODES
-        location = self._rng.choice(spawn_nodes)
+        location = self._rng.choice(PatientManager._SPAWN_NODES)
         call = {
             "call_id": call_id,
             "category": category,
@@ -1439,21 +1521,14 @@ class CodeRedEnvironment(Environment):
             "step": self._state.step_count,
             "call_id": call_id,
             "event": "call_received",
-            "category": category.value if hasattr(category, 'value') else category,
+            "category": category.value if hasattr(category, "value") else category,
             "location": location,
         })
 
     def _force_spawn_at_scene(self, call_id: str, amb_id: str) -> None:
-        """Spawn a patient immediately when an ambulance arrives at scene and no patient exists.
-
-        Used for Phase 2: ambulance arrives with CALL:{call_id} but patient hasn't been spawned
-        yet (countdown expired before dispatch, or first arrival). Spawns the patient at the
-        call's location_node and links it to the ambulance.
-        """
         from server.subsystems.constants import DISPATCH_CATEGORY_MAP
         from server.subsystems.patient_manager import PatientManager
 
-        # Get call data: from _pending_calls dict if still there, else from pending linkage
         call = next((c for c in self._pending_calls if c["call_id"] == call_id), None)
         pending_entry = self._pending_call_to_patient.get(call_id, {})
 
@@ -1466,11 +1541,10 @@ class CodeRedEnvironment(Environment):
             outcome = next((o for o in self._dispatch_outcomes_history if o["call_id"] == call_id), None)
             category = outcome["category"] if outcome else list(DISPATCH_CATEGORY_MAP.keys())[0]
         else:
-            return  # No data to spawn from
+            return
 
         spawn_nodes = PatientManager._SPAWN_NODES
         loc = location if location in [n["id"] for n in CITY_NODES] else self._rng.choice(spawn_nodes)
-
         condition_choices = DISPATCH_CATEGORY_MAP[category]
         conditions, probs = zip(*condition_choices)
         true_condition = self._rng.choices(list(conditions), weights=list(probs))[0]
@@ -1483,12 +1557,10 @@ class CodeRedEnvironment(Environment):
         patient.assigned_ambulance = amb_id
         self._phase2_has_activity = True
 
-        # Update ambulance
         amb = self._ambulance_manager.get(amb_id)
         if amb:
             amb.patient_id = patient.id
 
-        # Update pending linkage
         if not pending_entry.get("spawned"):
             self._pending_call_to_patient[call_id] = {
                 "ambulance_id": amb_id,
@@ -1497,13 +1569,13 @@ class CodeRedEnvironment(Environment):
                 "spawned_patient_id": patient.id,
             }
 
-        # Clean up countdown and call dict
         self._pending_calls = [c for c in self._pending_calls if c["call_id"] != call_id]
         self._pending_call_countdown.pop(call_id, None)
         self._ambulance_pending_patient.pop(amb_id, None)
 
         self._patients = self._patient_manager.patients
-        self._alerts.append(f"ON-SCENE: {category.value if hasattr(category, 'value') else category} call {call_id} force-spawned for {amb_id}")
+        cat_val = category.value if hasattr(category, "value") else category
+        self._alerts.append(f"ON-SCENE: {cat_val} call {call_id} force-spawned for {amb_id}")
         self._episode_log.append({
             "step": self._state.step_count,
             "patient_id": patient.id,
@@ -1515,11 +1587,10 @@ class CodeRedEnvironment(Environment):
             "force_spawn": True,
         })
 
-        # Record dispatch outcome for classification reward
         outcome = {
             "call_id": call_id,
             "decision": "no_dispatch",
-            "category": category.value if hasattr(category, "value") else category,
+            "category": cat_val,
             "true_condition": true_condition,
             "als_needed": true_condition in ("cardiac", "stroke", "trauma"),
             "revealed_at_step": self._state.step_count,
@@ -1536,19 +1607,15 @@ class CodeRedEnvironment(Environment):
             self._dispatch_outcomes_history.append(outcome)
 
     def _spawn_patient_from_call(self, call_id: str) -> None:
-        """Force-spawn a patient when a call's countdown expires or ambulance arrives."""
         call = next((c for c in self._pending_calls if c["call_id"] == call_id), None)
         if call is None:
-            # Call already removed — try to recover from pending linkage
             entry = self._pending_call_to_patient.get(call_id, {})
             amb_id = entry.get("ambulance_id")
             loc = entry.get("location_node", "")
             if loc and amb_id:
                 from server.subsystems.constants import DISPATCH_CATEGORY_MAP
-                from server.subsystems.patient_manager import PatientManager
-                categories = list(DISPATCH_CATEGORY_MAP.keys())
-                # Use the category from the dispatch outcome history if available
                 outcome = next((o for o in self._dispatch_outcomes_history if o["call_id"] == call_id), None)
+                categories = list(DISPATCH_CATEGORY_MAP.keys())
                 category = outcome["category"] if outcome else categories[0]
                 conditions, probs = zip(*DISPATCH_CATEGORY_MAP[category])
                 true_condition = self._rng.choices(list(conditions), weights=list(probs))[0]
@@ -1567,46 +1634,42 @@ class CodeRedEnvironment(Environment):
                 entry["spawned_patient_id"] = patient.id
                 self._patients = self._patient_manager.patients
             return
+
         self._pending_calls = [c for c in self._pending_calls if c["call_id"] != call_id]
-        if call_id in self._pending_call_countdown:
-            del self._pending_call_countdown[call_id]
+        self._pending_call_countdown.pop(call_id, None)
+
         from server.subsystems.constants import DISPATCH_CATEGORY_MAP
         category = call["category"]
         condition_choices = DISPATCH_CATEGORY_MAP[category]
         conditions, probs = zip(*condition_choices)
         true_condition = self._rng.choices(list(conditions), weights=list(probs))[0]
         patient = self._patient_manager.spawn_secondary(
-            condition=true_condition,
-            triggered_by=None,
-            reason="forced_spawn",
-            onset_step=self._state.step_count,
-            spawn_node=call["location_node"],
+            condition=true_condition, triggered_by=None, reason="forced_spawn",
+            onset_step=self._state.step_count, spawn_node=call["location_node"],
         )
         patient.dispatch_call_id = call_id
         patient.observed_condition = true_condition
         self._phase2_has_activity = True
 
-        # Link the patient to the ambulance that was dispatched
         call_assigned_amb = call.get("assigned_ambulance_id")
         if call_assigned_amb:
             patient.assigned_ambulance = call_assigned_amb
             amb = self._ambulance_manager.get(call_assigned_amb)
             if amb:
-                amb.patient_id = patient.id  # resolve the CALL:xxx placeholder
+                amb.patient_id = patient.id
 
-        # Mark the pending entry as spawned
         pending_entry = self._pending_call_to_patient.get(call_id)
         if pending_entry:
             pending_entry["spawned"] = True
             pending_entry["spawned_patient_id"] = patient.id
-            # Clean up ambulance→pending mapping
             amb_id = pending_entry.get("ambulance_id")
             if amb_id and self._ambulance_pending_patient.get(amb_id, {}).get("call_id") == call_id:
                 del self._ambulance_pending_patient[amb_id]
 
         call["spawned_patient_id"] = patient.id
         self._patients = self._patient_manager.patients
-        self._alerts.append(f"ON-SCENE: {category.value if hasattr(category, 'value') else category} call {call_id} force-spawned")
+        cat_val = category.value if hasattr(category, "value") else category
+        self._alerts.append(f"ON-SCENE: {cat_val} call {call_id} force-spawned")
         self._episode_log.append({
             "step": self._state.step_count,
             "patient_id": patient.id,
@@ -1615,20 +1678,17 @@ class CodeRedEnvironment(Environment):
             "is_secondary": False,
             "call_id": call_id,
             "target_time": PATIENT_TARGET_TIMES.get(true_condition, 60),
-            "force_spawn": True,  # indicates countdown-expired, not true natural arrival
+            "force_spawn": True,
         })
+
         outcome = {
             "call_id": call_id,
             "decision": "no_dispatch",
-            "category": category.value if hasattr(category, 'value') else category,
+            "category": cat_val,
             "true_condition": true_condition,
             "als_needed": true_condition in ("cardiac", "stroke", "trauma"),
             "revealed_at_step": self._state.step_count,
         }
-        # Backfill the existing pending outcome entry from dispatch_als/dispatch_bls.
-        # Without this, a dispatch+spawn creates TWO entries: one with null ground truth
-        # (from dispatch) and one with correct ground truth (here). The first entry's
-        # true_condition stays None forever, poisoning the cascade classification reward.
         found = False
         for entry in self._dispatch_outcomes_history:
             if entry["call_id"] == call_id and entry["true_condition"] is None:

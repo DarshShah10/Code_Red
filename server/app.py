@@ -388,14 +388,14 @@ async def run_inference(req: InferenceRequest):
     )
 
 
-def main(host: str = "0.0.0.0", port: int = 7860):
+def main():
+    """Entry point for the OpenEnv validator and CLI."""
     import uvicorn
-    uvicorn.run(app, host=host, port=port, workers=1)
-
+    # Use environment variable for port, falling back to 7860 for HF Spaces
+    port = int(os.getenv("PORT", 7860))
+    # We pass the string "server.app:app" to uvicorn for better reliability
+    uvicorn.run("server.app:app", host="0.0.0.0", port=port, workers=1)
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=7860)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()
+

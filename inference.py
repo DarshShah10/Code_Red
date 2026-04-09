@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
 """
 CodeRedEnv Inference Script — OpenEnv Spec Compliant
-
-MANDATORY environment variables:
-  API_BASE_URL   The API endpoint for the LLM (default: https://openrouter.ai/api/v1)
-  MODEL_NAME     The model identifier (default: qwen/qwen3.6-plus)
-  HF_TOKEN       Hugging Face / API key (optional)
-  LOCAL_IMAGE_NAME  Docker image name for from_docker_image() (optional)
-
-If LOCAL_IMAGE_NAME is set: uses CodeRedEnv.from_docker_image() (async, Docker)
-Otherwise: imports CodeRedEnvironment directly (sync, no Docker needed)
-
-STDOUT FORMAT (exact — enforced by validator):
-  [START] task=<task> env=<benchmark> model=<model>
-  [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-  [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
 from __future__ import annotations
@@ -64,8 +50,7 @@ def _get_provider_config(explicit: str | None = None) -> tuple[str, str, str, st
             ANTHROPIC_API_KEY,
         )
     else:
-        # If provider is "openai" OR "hf_fallback" (used by the OpenEnv grader)
-        # Simply return the OpenAI client config using the required variables!
+        # REQUIRED FOR OPENENV VALIDATOR: Must use OpenAI client and fallback to HF_TOKEN
         return "openai", API_BASE_URL, MODEL_NAME, OPENAI_API_KEY or HF_TOKEN
 
 # ── Function definitions (must match server/models/actions.py) ─────────────
@@ -161,10 +146,6 @@ ACTION_TYPE_MAP: dict[str, str] = {
 }
 
 def parse_action_string(action_str: str) -> tuple[dict[str, Any], str]:
-    """
-    Parse LLM response into (action_dict, display_str).
-    Handles: fn_name(k=v, ...) or plain text (fallback to maintain_plan).
-    """
     fn_match = re.match(r"^(\w+)\((.*)\)$", action_str.strip())
     if fn_match:
         fn_name = fn_match.group(1)
@@ -186,7 +167,6 @@ def parse_action_string(action_str: str) -> tuple[dict[str, Any], str]:
 # ── Observation formatting ────────────────────────────────────────────────────
 
 def format_observation(obs) -> str:
-    """Format CodeRedObservation as a concise text prompt for the LLM."""
     lines = [f"=== Step {obs.step} ==="]
 
     if obs.patients:
@@ -266,7 +246,6 @@ def _convert_to_anthropic_tools(functions: list[dict]) -> list[dict]:
     return anthropic_tools
 
 def call_model(messages: list[dict], explicit_provider: str | None = None) -> str:
-    """Call LLM. Provider auto-detected from env vars or --provider flag."""
     provider, base_url, model, api_key = _get_provider_config(explicit_provider)
 
     if provider == "anthropic":
@@ -332,7 +311,6 @@ def _call_openai(messages: list[dict], model: str, base_url: str, api_key: str |
 # ── Environment setup ────────────────────────────────────────────────────────
 
 def _build_action_obj(action_dict: dict):
-    """Convert action dict to typed CodeRedAction object."""
     from server.models.actions import (
         DispatchAmbulance, DispatchALS, DispatchBLS, TriageCall,
         PrepareOR, PageSpecialist, AssignHospital, PreemptOR,
@@ -369,10 +347,6 @@ def run_episode(
     task_id: str, seed: int = 0, max_steps: int = MAX_STEPS_DEFAULT,
     benchmark: str = BENCHMARK, explicit_provider: str | None = None,
 ) -> float:
-    """
-    Run one episode using Docker (from_docker_image) if LOCAL_IMAGE_NAME is set,
-    otherwise use direct Python import (no Docker).
-    """
     provider, _, model_name, _ = _get_provider_config(explicit_provider)
     actual_model = os.getenv("MODEL_NAME") or model_name
 
@@ -386,13 +360,13 @@ def run_episode(
 
     try:
         if LOCAL_IMAGE_NAME:
-            # ── Docker mode: use async CodeRedEnv.from_docker_image() ──
-            env, obs, done = _run_docker_episode(
+            # ── Docker mode: Use asyncio.run and await the setup properly ──
+            env, obs, done = asyncio.run(_run_docker_episode(
                 LOCAL_IMAGE_NAME, task_id, seed, max_steps,
                 actual_model, provider, log_step,
-            )
+            ))
         else:
-            # ── Local mode: import CodeRedEnvironment directly ──
+            # ── Local mode: direct import ──
             env, obs, done = _run_local_episode(
                 task_id, seed, max_steps,
                 actual_model, provider, log_step,
@@ -405,7 +379,6 @@ def run_episode(
         sys.stderr.write(f"[ERROR] Episode crashed: {exc}\n")
         last_error = str(exc)
 
-    # Grade the episode
     breakdown: dict | None = None
     try:
         from server.grader import grade_from_environment
@@ -431,10 +404,11 @@ async def _run_docker_episode(
     image_name: str, task_id: str, seed: int, max_steps: int,
     model: str, provider: str, log_step_fn,
 ):
-    """Run episode via CodeRedEnv.from_docker_image() (async, Docker)."""
     from client import CodeRedEnv
 
-    async with CodeRedEnv.from_docker_image(image_name) as env:
+    # FIX: Await the coroutine to get the instance, then context manage it
+    client_instance = await CodeRedEnv.from_docker_image(image_name)
+    async with client_instance as env:
         result = await env.reset(seed=seed, task_id=task_id)
         obs = result.observation
         rewards: list[float] = []
@@ -464,7 +438,6 @@ async def _run_docker_episode(
             if done:
                 break
 
-        # Attach rewards for grading
         env._rewards = rewards
         return env, obs, result.done
 
@@ -473,9 +446,7 @@ def _run_local_episode(
     task_id: str, seed: int, max_steps: int,
     model: str, provider: str, log_step_fn,
 ):
-    """Run episode via direct CodeRedEnvironment import (sync, no Docker)."""
     from server.codered_environment import CodeRedEnvironment
-    from server.grader import grade_from_environment
 
     env = CodeRedEnvironment()
     obs = env.reset(seed=seed, task_id=task_id)
